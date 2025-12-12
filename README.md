@@ -8,9 +8,9 @@ Go to Terraform official webiste -- https://developer.hashicorp.com/terraform/tu
 - Add **terraform.exe** to Window **Environment Variables PATH**
 - Verify installation
 
+    # Check version
     terraform version
 
-Check Help command
-
+    # Check Help command
     terraform -help
 
