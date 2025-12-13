@@ -1,0 +1,29 @@
+================================================================================
+                    DIGITALOCEAN DROPLETS INFORMATION
+================================================================================
+
+Generated:  ${timestamp()}
+
+SSH Private Key: ${ssh_key_path}
+
+--------------------------------------------------------------------------------
+DROPLET DETAILS
+--------------------------------------------------------------------------------
+%{ for idx, droplet in droplets ~}
+
+Server ${idx + 1}:  ${droplet.name}
+  - IP Address: ${droplet.ipv4_address}
+  - Region: ${droplet.region}
+  - Size: ${droplet.size}
+  - Status: ${droplet.status}
+  - SSH Command: ssh -i "${ssh_key_path}" root@${droplet.ipv4_address}
+
+%{ endfor ~}
+--------------------------------------------------------------------------------
+QUICK SSH COMMANDS (Copy & Paste)
+--------------------------------------------------------------------------------
+%{ for droplet in droplets ~}
+ssh -i "${ssh_key_path}" root@${droplet.ipv4_address}
+%{ endfor ~}
+
+================================================================================

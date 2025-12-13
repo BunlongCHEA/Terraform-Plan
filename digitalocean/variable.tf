@@ -10,6 +10,12 @@ variable "region" {
   default     = "sgp1"  # Singapore, change as needed
 }
 
+variable "droplet_os" {
+  description = "Operating system for the droplets"
+  type        = string
+  default     = "ubuntu-24-04-x64"
+}
+
 variable "droplet_size" {
   description = "Droplet size"
   type        = string

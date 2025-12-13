@@ -1,0 +1,29 @@
+# Installation Summary
+
+**Generated:** ${timestamp}
+
+## Droplets Created
+
+| Name | IP Address | Region |
+|------|------------|--------|
+%{ for droplet in droplets ~}
+| ${droplet.name} | ${droplet.ipv4_address} | ${droplet.region} |
+%{ endfor ~}
+
+## Software Installed
+
+- ✅ Python 3
+- ✅ pip3
+- ✅ Ansible
+
+## SSH Access
+
+**Private Key Location:** `${ssh_key_path}`
+
+### Connection Commands
+
+%{ for droplet in droplets ~}
+```bash
+ssh -i "${ssh_key_path}" root@${droplet.ipv4_address}
+```
+%{ endfor ~}

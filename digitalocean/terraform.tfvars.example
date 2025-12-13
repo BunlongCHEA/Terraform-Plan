@@ -1,0 +1,10 @@
+# Rename terraform.tfvars.example => terraform.tfvars
+# Copy and Fill in values for terraform.tfvars
+
+do_token      = "<Replace with DigitalOcean API token>"
+region        = "sgp1"          # Singapore
+droplet_os    = "ubuntu-24-04-x64" # Ubuntu 24.04
+droplet_size  = "s-1vcpu-2gb"   # Basic droplet
+droplet_count = 1
+ssh_key_name  = "<Replace with SSH key name>"
+project_name  = "<Replace with any project name>"
