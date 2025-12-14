@@ -34,6 +34,12 @@ variable "ssh_key_name" {
   default     = "terraform-ansible-key"
 }
 
+variable "ssh_path" {
+  description = "Name for the SSH key in DigitalOcean"
+  type        = string
+  default     = "/home/admin-ubuntu/.ssh"
+}
+
 variable "project_name" {
   description = "Project name prefix for resources"
   type        = string

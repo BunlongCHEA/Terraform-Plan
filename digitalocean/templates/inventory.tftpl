@@ -9,3 +9,7 @@ ${droplet.name} ansible_host=${droplet.ipv4_address} ansible_user=root ansible_s
 [os_servers:vars]
 ansible_python_interpreter=/usr/bin/python3
 ansible_ssh_common_args='-o StrictHostKeyChecking=no'
+
+# Group all servers
+[all_servers: children]
+os_servers

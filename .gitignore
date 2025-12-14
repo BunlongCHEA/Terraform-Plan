@@ -1,0 +1,7 @@
+/digitalocean/terraform.tfvars
+/digitalocean/terraform.tfstat*
+/digitalocean/.terraform.lock.hcl
+/digitalocean/.terraform/*
+/digitalocean/ssh_keys/*
+/digitalocean/output/*
+/digitalocean/run_ansible.bat

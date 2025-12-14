@@ -26,14 +26,23 @@ resource "null_resource" "wait_for_ssh" {
   depends_on = [digitalocean_droplet.os_family]
 
   provisioner "remote-exec" {
-    inline = ["echo 'SSH is ready!'"]
+    inline = [
+      "echo 'SSH connection successful!'",
+      "echo 'Hostname: ' $(hostname)",
+      "echo 'IP: ' $(hostname -I)",
+      "cat /etc/os-release | grep PRETTY_NAME"
+    ]
 
     connection {
       type        = "ssh"
       user        = "root"
-      private_key = tls_private_key.ssh_key.private_key_pem
+      private_key = local.private_key_pem
       host        = digitalocean_droplet.os_family[count.index].ipv4_address
-      timeout     = "5m"
+      timeout     = "1m"
     }
+  }
+
+  triggers = {
+    droplet_id = digitalocean_droplet.os_family[count.index].id
   }
 }

@@ -1,0 +1,166 @@
+---
+- name: Install Ansible, Python3, pip on DigitalOcean droplets
+  hosts: os_servers
+  become: yes
+  gather_facts: yes
+  vars:
+    # Map OS family names for conditional installation
+    # Ansible uses:  "Debian" for Ubuntu/Debian, "RedHat" for RHEL/CentOS/Rocky/Alma
+    supported_debian_family: "Debian"
+    supported_redhat_family: "RedHat"
+
+  tasks:
+    # ==========================================
+    # Ubuntu / Debian Installation
+    # ==========================================
+    - name: "[Debian/Ubuntu] Update apt cache"
+      apt:
+        update_cache: yes
+        cache_valid_time: 3600
+      when: ansible_os_family == supported_debian_family
+
+    - name: "[Debian/Ubuntu] Upgrade all packages"
+      apt:
+        upgrade: dist
+        autoremove: yes
+      when: ansible_os_family == supported_debian_family
+
+    - name: "[Debian/Ubuntu] Install Python3 and dependencies"
+      apt:
+        name:
+          - python3
+          - python3-pip
+          - python3-venv
+          - python3-full
+          - software-properties-common
+          - curl
+          - wget
+          - git
+        state: present
+      when: ansible_os_family == supported_debian_family
+
+    - name: "[Debian/Ubuntu] Create pip config directory"
+      file:
+        path: /root/.config/pip
+        state: directory
+        mode:  '0755'
+      when: ansible_os_family == supported_debian_family
+
+    - name: "[Debian/Ubuntu] Configure pip for PEP 668 (Ubuntu 24.04+)"
+      copy:
+        dest: /root/.config/pip/pip.conf
+        content: |
+          [global]
+          break-system-packages = true
+        mode: '0644'
+      when: 
+        - ansible_os_family == supported_debian_family
+        - ansible_distribution_major_version | int >= 24
+
+    - name:  "[Debian/Ubuntu] Add Ansible PPA repository"
+      apt_repository:
+        repo:  ppa:ansible/ansible
+        state: present
+      when: ansible_os_family == supported_debian_family
+      ignore_errors: yes
+      register: ppa_result
+
+    - name:  "[Debian/Ubuntu] Update apt cache after adding PPA"
+      apt:
+        update_cache:  yes
+      when: 
+        - ansible_os_family == supported_debian_family
+        - ppa_result is succeeded
+
+    - name: "[Debian/Ubuntu] Install Ansible from apt"
+      apt:
+        name: ansible
+        state: latest
+      when: ansible_os_family == supported_debian_family
+      ignore_errors: yes
+      register: ansible_apt_result
+
+    - name: "[Debian/Ubuntu] Install Ansible via pip (fallback)"
+      pip:
+        name: ansible
+        state:  latest
+        executable: pip3
+      when:  
+        - ansible_os_family == supported_debian_family
+        - ansible_apt_result is failed
+
+    # ==========================================
+    # RHEL / CentOS / Rocky / AlmaLinux Installation
+    # ==========================================
+    - name: "[RedHat] Install EPEL repository"
+      yum:
+        name: epel-release
+        state: present
+      when: ansible_os_family == supported_redhat_family
+      ignore_errors: yes
+
+    - name: "[RedHat] Update all packages"
+      yum: 
+        name:  "*"
+        state: latest
+      when: ansible_os_family == supported_redhat_family
+
+    - name: "[RedHat] Install Python3 and dependencies"
+      yum:
+        name:
+          - python3
+          - python3-pip
+          - python3-devel
+          - curl
+          - wget
+          - git
+        state: present
+      when: ansible_os_family == supported_redhat_family
+
+    - name: "[RedHat] Install Ansible"
+      yum:
+        name: ansible-core
+        state: present
+      when: ansible_os_family == supported_redhat_family
+      ignore_errors: yes
+      register: ansible_yum_result
+
+    - name: "[RedHat] Install Ansible via pip (fallback)"
+      pip:
+        name: ansible
+        state: latest
+        executable: pip3
+      when: 
+        - ansible_os_family == supported_redhat_family
+        - ansible_yum_result is failed
+
+    # ==========================================
+    # Verification (All OS)
+    # ==========================================
+    - name:  Verify Python3 installation
+      command: python3 --version
+      register: python_version
+      changed_when: false
+
+    - name: Verify pip installation
+      shell: pip3 --version || python3 -m pip --version
+      register: pip_version
+      changed_when: false
+
+    - name: Verify Ansible installation
+      command: ansible --version
+      register: ansible_version
+      changed_when: false
+
+    - name: Display installed versions
+      debug: 
+        msg:
+          - "========================================="
+          - "Hostname:  {{ ansible_hostname }}"
+          - "OS: {{ ansible_distribution }} {{ ansible_distribution_version }}"
+          - "OS Family: {{ ansible_os_family }}"
+          - "========================================="
+          - "Python:  {{ python_version }}"
+          - "Pip: {{ pip_version }}"
+          - "Ansible: {{ ansible_version }}"
+          - "========================================="
