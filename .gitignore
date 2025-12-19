@@ -4,4 +4,5 @@
 /digitalocean/.terraform/*
 /digitalocean/ssh_keys/*
 /digitalocean/output/*
+/digitalocean/rancher/*
 /digitalocean/run_ansible.bat

@@ -20,6 +20,15 @@ NC='\033[0m' # No Color
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
+# SSH key path (always in ~/.ssh)
+SSH_PRIVATE_KEY="$HOME/.ssh/id_rsa_digitalocean"
+
+# Inventory and playbook paths
+INVENTORY="$SCRIPT_DIR/output/inventory.ini"
+PLAYBOOK_ANSIBLE="$SCRIPT_DIR/ansible_install_ansible.yml"
+PLAYBOOK_RANCHER="$SCRIPT_DIR/ansible_install_rancher.yml"
+SERVER="os_servers"
+
 # ===========================================
 # Functions
 # ===========================================
@@ -53,13 +62,13 @@ create_directories() {
     print_header "Creating Directories"
     
     mkdir -p templates
-    print_success "Created:  templates/"
-    
-    mkdir -p ssh_keys
-    print_success "Created: ssh_keys/"
+    print_success "Created: templates/"
     
     mkdir -p output
     print_success "Created: output/"
+
+    mkdir -p rancher
+    print_success "Created: rancher/"
 }
 
 # Set DigitalOcean token
@@ -84,7 +93,7 @@ set_do_token() {
     print_warning "DigitalOcean token not found!"
     echo ""
     echo "Options:"
-    echo "  1. Set environment variable:  export TF_VAR_do_token='your_token'"
+    echo "  1. Set environment variable: export TF_VAR_do_token='your_token'"
     echo "  2. Add to terraform.tfvars: do_token = \"your_token\""
     echo ""
     read -p "Enter DigitalOcean API token (or press Enter to skip): " token
@@ -145,36 +154,16 @@ terraform_destroy() {
     fi
 }
 
-# Fix SSH key permissions
-fix_ssh_permissions() {
-    print_header "Fixing SSH Key Permissions"
-    
-    SSH_KEY="$SCRIPT_DIR/ssh_keys/id_rsa_digitalocean"
-    
-    if [ -f "$SSH_KEY" ]; then
-        chmod 600 "$SSH_KEY"
-        print_success "SSH key permissions set to 600: $SSH_KEY"
-        
-        # Also fix public key
-        if [ -f "${SSH_KEY}.pub" ]; then
-            chmod 644 "${SSH_KEY}.pub"
-            print_success "SSH public key permissions set to 644"
-        fi
-    else
-        print_warning "SSH key not found yet:  $SSH_KEY"
-        print_info "Run 'terraform apply' first to generate keys"
-    fi
-}
-
 # Test Ansible connectivity
 test_ansible() {
     print_header "Testing Ansible Connectivity"
     
-    INVENTORY="$SCRIPT_DIR/output/inventory.ini"
+    # INVENTORY="$SCRIPT_DIR/output/inventory.ini"
+    # SERVER="os_servers"
     
     if [ -f "$INVENTORY" ]; then
         print_info "Testing connection to all hosts..."
-        ansible -i "$INVENTORY" ubuntu_servers -m ping
+        ansible -i "$INVENTORY" "$SERVER" -m ping
         print_success "Ansible connectivity test completed"
     else
         print_error "Inventory file not found: $INVENTORY"
@@ -183,11 +172,11 @@ test_ansible() {
 }
 
 # Run Ansible playbook
-run_ansible() {
-    print_header "Running Ansible Playbook"
+run_ansible_ansible() {
+    print_header "Running Ansible Playbook - Install Ansible"
     
-    INVENTORY="$SCRIPT_DIR/output/inventory.ini"
-    PLAYBOOK="$SCRIPT_DIR/ansible_install_software.yml"
+    # INVENTORY="$SCRIPT_DIR/output/inventory.ini"
+    # PLAYBOOK="$SCRIPT_DIR/ansible_install_ansible.yml"
     
     if [ !  -f "$INVENTORY" ]; then
         print_error "Inventory file not found: $INVENTORY"
@@ -195,40 +184,82 @@ run_ansible() {
         return 1
     fi
     
-    if [ ! -f "$PLAYBOOK" ]; then
-        print_error "Playbook not found: $PLAYBOOK"
+    if [ ! -f "$PLAYBOOK_ANSIBLE" ]; then
+        print_error "Playbook not found: $PLAYBOOK_ANSIBLE"
         return 1
     fi
     
-    print_info "Running playbook:  $PLAYBOOK"
-    ansible-playbook -i "$INVENTORY" "$PLAYBOOK"
+    print_info "Running playbook -- Installing Python3, pip, Ansible:  $PLAYBOOK_ANSIBLE"
+    ansible-playbook -i "$INVENTORY" "$PLAYBOOK_ANSIBLE"
     print_success "Ansible playbook completed"
 }
 
-# Display help
-show_help() {
+run_ansible_rancher() {
+    print_header "Running Ansible Playbook - Install K3s + Rancher"
+    
+    if [ !  -f "$INVENTORY" ]; then
+        print_error "Inventory not found: $INVENTORY"
+        return 1
+    fi
+    
+    if [ ! -f "$PLAYBOOK_RANCHER" ]; then
+        print_error "Playbook not found: $PLAYBOOK_RANCHER"
+        print_info "Create ansible_install_rancher.yml first"
+        return 1
+    fi
+    
+    print_info "This will install:"
+    print_info "  - K3s (Lightweight Kubernetes)"
+    print_info "  - Helm"
+    print_info "  - cert-manager"
+    print_info "  - Rancher Server"
     echo ""
-    echo "Usage: $0 [command]"
+    
+    # Count hosts in inventory
+    HOST_COUNT=$(grep -c "ansible_host=" "$INVENTORY" 2>/dev/null || echo "0")
+    
+    echo "Select installation mode:"
+    echo "  1) Single node (first server only)"
+    echo "  2) Multi-node cluster (all $HOST_COUNT servers)"
+    read -p "Choice [1-2]: " install_mode
+    
     echo ""
-    echo "Commands:"
-    echo "  init        Initialize Terraform"
-    echo "  validate    Validate Terraform configuration"
-    echo "  plan        Preview Terraform changes"
-    echo "  apply       Apply Terraform changes (create resources)"
-    echo "  output      Show Terraform outputs"
-    echo "  destroy     Destroy all Terraform resources"
-    echo "  fix-ssh     Fix SSH key permissions"
-    echo "  test        Test Ansible connectivity"
-    echo "  ansible     Run Ansible playbook"
-    echo "  all         Run full workflow (init -> apply -> fix-ssh -> ansible)"
-    echo "  help        Show this help message"
+    print_warning "This may take 10-20 minutes..."
+    # print_warning "Minimum requirements:  4GB RAM, 2 CPU cores per node"
     echo ""
-    echo "Examples:"
-    echo "  $0 all          # Full workflow"
-    echo "  $0 apply        # Only apply Terraform"
-    echo "  $0 ansible      # Only run Ansible playbook"
-    echo "  $0 destroy      # Destroy all resources"
+    
+    read -p "Continue? (yes/no): " confirm
+    [ "$confirm" != "yes" ] && return 0
+    
+    case $install_mode in
+        1)
+            print_info "Installing on first server only..."
+            ansible-playbook -i "$INVENTORY" "$PLAYBOOK_RANCHER" --limit "$SERVER[0]" -v
+            ;;
+        2)
+            print_info "Installing multi-node cluster..."
+            ansible-playbook -i "$INVENTORY" "$PLAYBOOK_RANCHER" -v
+            ;;
+        *)
+            print_info "Installing on first server only (default)..."
+            ansible-playbook -i "$INVENTORY" "$PLAYBOOK_RANCHER" --limit "$SERVER[0]" -v
+            ;;
+    esac
+    
+    print_success "Rancher installation completed!"
     echo ""
+    
+    # Get the first droplet IP
+    FIRST_IP=$(grep -m1 "ansible_host=" "$INVENTORY" | grep -oP 'ansible_host=\K[^\s]+')
+    
+    print_header "RANCHER ACCESS INFORMATION"
+    echo -e "${GREEN}==========================================================${NC}"
+    echo -e "${GREEN}  URL: https://${FIRST_IP}.nip.io${NC}"
+    echo -e "${GREEN}  Alternative:  https://${FIRST_IP}${NC}"
+    echo -e "${YELLOW}  Bootstrap Password: admin${NC}"
+    echo -e "${GREEN}==========================================================${NC}"
+    echo ""
+    print_info "Accept the self-signed certificate in your browser"
 }
 
 # Full workflow
@@ -249,23 +280,87 @@ run_all() {
     fi
     
     terraform_apply
-    fix_ssh_permissions
     terraform_output
     
+    print_info "Waiting 30 seconds for droplets to be ready..."
+    sleep 30
+    
+    test_ansible
+
     echo ""
-    read -p "Run Ansible playbook? (yes/no): " run_pb
-    if [ "$run_pb" == "yes" ]; then
-        # Wait a bit for droplets to be fully ready
-        print_info "Waiting 30 seconds for droplets to be fully ready..."
-        sleep 30
-        test_ansible
-        run_ansible
-    fi
+    echo "Select installation option:"
+    echo "  1) Basic software only (Python3, pip, Ansible)"
+    echo "  2) Rancher prerequisites (Go, Terraform, Docker, kubectl + clone & build)"
+    echo "  3) Both"
+    echo "  4) Skip"
+    read -p "Choice [1-4]: " install_choice
+    
+    case $install_choice in
+        1) run_ansible_ansible ;;
+        2) run_ansible_rancher ;;
+        3) run_ansible_ansible; run_ansible_rancher ;;
+        4) print_info "Skipping software installation" ;;
+    esac
     
     print_header "Workflow Complete!"
-    echo ""
-    print_info "SSH to servers using commands from 'terraform output ssh_connection_commands'"
-    echo ""
+}
+
+run_rancher_full() {
+    print_header "Full Rancher Workflow"
+    
+    create_directories
+    set_do_token
+    terraform_init
+    terraform_validate
+    
+    read -p "Proceed with apply? (yes/no): " confirm
+    [ "$confirm" != "yes" ] && exit 0
+    
+    terraform_apply
+    terraform_output
+    
+    print_info "Waiting 60 seconds for droplets to be fully ready..."
+    sleep 60
+    
+    test_ansible
+    run_ansible_rancher
+    
+    print_header "Rancher Installation Complete!"
+    print_info "SSH to your servers and check:"
+    print_info "  - go version"
+    print_info "  - terraform version"
+    print_info "  - docker version"
+    print_info "  - kubectl version --client"
+    print_info "  - ls /root/go/src/github.com/terraform-providers/terraform-provider-rancher2"
+}
+
+# Display help
+show_help() {
+    echo "
+Usage: $0 [command]
+
+Commands:
+  all            Full workflow (init → apply → choose installation)
+  rancher-full   Full Rancher workflow (init → apply → install Rancher prereqs)
+  init           Initialize Terraform
+  validate       Validate configuration
+  plan           Preview changes
+  apply          Apply changes
+  output         Show outputs
+  destroy        Destroy resources
+  test           Test Ansible connectivity
+  ansible        Run basic software Ansible playbook
+  rancher        Run Rancher prerequisites Ansible playbook
+  help           Show this help
+
+SSH Key Location:  $SSH_PRIVATE_KEY
+
+Examples:
+  $0 all              # Full workflow with options
+  $0 rancher-full     # Create droplets and install Rancher prereqs
+  $0 rancher          # Only run Rancher Ansible playbook
+  $0 clone-rancher    # Clone Rancher repo locally
+"
 }
 
 # ===========================================
@@ -273,9 +368,16 @@ run_all() {
 # ===========================================
 
 print_header "Terraform & Ansible Deployment Script"
-print_info "Working directory: $SCRIPT_DIR"
+print_info "Directory:  $SCRIPT_DIR"
+print_info "SSH Key:  $SSH_PRIVATE_KEY"
 
 case "${1:-}" in
+    all)
+        run_all
+        ;;
+    rancher-full)
+        run_rancher_full
+        ;;
     init)
         create_directories
         set_do_token
@@ -290,7 +392,7 @@ case "${1:-}" in
     apply)
         set_do_token
         terraform_apply
-        fix_ssh_permissions
+        # fix_ssh_permissions
         terraform_output
         ;;
     output)
@@ -299,18 +401,14 @@ case "${1:-}" in
     destroy)
         terraform_destroy
         ;;
-    fix-ssh)
-        fix_ssh_permissions
-        ;;
     test)
         test_ansible
         ;;
     ansible)
-        fix_ssh_permissions
-        run_ansible
+        run_ansible_ansible
         ;;
-    all)
-        run_all
+    rancher)
+        run_ansible_rancher
         ;;
     help|--help|-h)
         show_help
@@ -319,30 +417,32 @@ case "${1:-}" in
         # Default:  show menu
         echo ""
         echo "Select an option:"
-        echo "  1) Full workflow (init -> apply -> ansible)"
-        echo "  2) Initialize Terraform"
-        echo "  3) Plan changes"
-        echo "  4) Apply changes"
-        echo "  5) Run Ansible playbook"
-        echo "  6) Test Ansible connectivity"
-        echo "  7) Show outputs"
-        echo "  8) Fix SSH permissions"
-        echo "  9) Destroy all resources"
+        echo "  1) Full workflow (with options)"
+        echo "  2) Full Rancher workflow"
+        echo "  3) Initialize Terraform"
+        echo "  4) Plan changes"
+        echo "  5) Apply changes"
+        echo "  6) Run Ansible playbook (Install Python3, pip, Ansible)"
+        echo "  7) Run Ansible playbook (Install Rancher prerequisites)"
+        echo "  8) Test Ansible connectivity"
+        echo "  9) Show outputs"
+        echo "  10) Destroy all resources"
         echo "  0) Exit"
         echo ""
         read -p "Enter choice [0-9]: " choice
         
         case $choice in
             1) run_all ;;
-            2) create_directories; set_do_token; terraform_init ;;
-            3) terraform_plan ;;
-            4) set_do_token; terraform_apply; fix_ssh_permissions; terraform_output ;;
-            5) run_ansible ;;
-            6) test_ansible ;;
-            7) terraform_output ;;
-            8) fix_ssh_permissions ;;
-            9) terraform_destroy ;;
-            0) echo "Exiting... "; exit 0 ;;
+            2) run_rancher_full ;;
+            3) create_directories; set_do_token; terraform_init ;;
+            4) terraform_plan ;;
+            5) set_do_token; terraform_apply; terraform_output ;;
+            6) run_ansible_ansible ;;
+            7) run_ansible_rancher ;;
+            8) test_ansible ;;
+            9) terraform_output ;;
+            10) terraform_destroy ;;
+            0) echo "Exited... "; exit 0 ;;
             *) print_error "Invalid option"; exit 1 ;;
         esac
         ;;

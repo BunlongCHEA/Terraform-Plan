@@ -1,0 +1,465 @@
+---
+# ===========================================
+# Ansible Playbook: Install K3s + Rancher Server
+# Based on: https://github.com/rancher/quickstart/tree/main/rancher/rancher-common
+# ===========================================
+# This playbook installs:  
+# 1. K3s (Lightweight Kubernetes)
+# 2. Helm
+# 3. cert-manager
+# 4. Rancher Server via Helm
+# ===========================================
+
+- name: Install K3s and Rancher Server
+  hosts: os_servers
+  become: yes
+  gather_facts: yes
+  
+  vars:
+    # K3s Version (from rancher/quickstart)
+    k3s_version: "v1.33.6+k3s1"
+    
+    # Rancher Configuration
+    rancher_version: "v2.13.1"
+    cert_manager_version: "1.19.2"
+    helm_version: "v3.19.4"
+    rancher_helm_repository: "https://releases.rancher.com/server-charts/stable"
+    
+    # Rancher Server DNS (uses nip.io for automatic DNS resolution)
+    rancher_server_dns: "{{ ansible_host }}.nip.io"
+    
+    # Admin password (min 12 characters) - CHANGE THIS!
+    rancher_admin_password: "adminPassword123"
+    rancher_bootstrap_password: "admin"
+    
+    # Paths
+    kubeconfig_path: "/etc/rancher/k3s/k3s.yaml"
+    helm_install_path: "/usr/local/bin/helm"
+    
+    # Workload cluster (optional)
+    workload_cluster_name: "quickstart-workload"
+    
+    # OS Family detection
+    supported_debian_family: "Debian"
+    supported_redhat_family: "RedHat"
+
+  tasks:
+    # ==========================================
+    # System Update
+    # ==========================================
+    - name: "[Debian/Ubuntu] Update apt cache"
+      apt:
+        update_cache: yes
+        cache_valid_time: 3600
+      when: ansible_os_family == supported_debian_family
+
+    - name: "[Debian/Ubuntu] Upgrade all packages"
+      apt:
+        upgrade: dist
+        autoremove: yes
+      when: ansible_os_family == supported_debian_family
+
+    - name: "[RedHat] Update all packages"
+      yum: 
+        name:  "*"
+        state: latest
+      when: ansible_os_family == supported_redhat_family
+
+    # ==========================================
+    # Install Base Dependencies
+    # ==========================================
+    - name: "[Debian/Ubuntu] Install base dependencies"
+      apt:
+        name:
+          - curl
+          - wget
+          - git
+          - jq
+          - apt-transport-https
+          - ca-certificates
+          - gnupg
+          - lsb-release
+          - open-iscsi
+          - nfs-common
+        state: present
+      when: ansible_os_family == supported_debian_family
+
+    - name: "[RedHat] Install EPEL repository"
+      yum:
+        name: epel-release
+        state: present
+      when: ansible_os_family == supported_redhat_family
+      ignore_errors: yes
+
+    - name: "[RedHat] Install base dependencies"
+      yum: 
+        name:
+          - curl
+          - wget
+          - git
+          - jq
+          - ca-certificates
+          - iscsi-initiator-utils
+          - nfs-utils
+        state: present
+      when: ansible_os_family == supported_redhat_family
+
+    # ==========================================
+    # Install K3s
+    # ==========================================
+    - name: Check if K3s is installed
+      command: k3s --version
+      register:  k3s_check
+      ignore_errors: yes
+      changed_when: false
+
+    - name: Install K3s
+      shell: |
+        curl -sfL https://get.k3s.io | \
+        INSTALL_K3S_VERSION="{{ k3s_version }}" \
+        INSTALL_K3S_EXEC="server \
+          --node-external-ip {{ ansible_host }} \
+          --node-ip {{ ansible_default_ipv4.address | default(ansible_host) }} \
+          --write-kubeconfig-mode 644" \
+        sh -
+      args:
+        executable: /bin/bash
+        creates: /usr/local/bin/k3s
+      when: k3s_check.rc != 0
+
+    - name: Wait for K3s to be ready
+      wait_for:
+        path: "{{ kubeconfig_path }}"
+        state: present
+        timeout: 120
+
+    - name: Wait for K3s node to be ready
+      shell: |
+        export KUBECONFIG={{ kubeconfig_path }}
+        kubectl wait --for=condition=Ready nodes --all --timeout=300s
+      args:
+        executable: /bin/bash
+      retries: 10
+      delay: 15
+      register: k3s_ready
+      until: k3s_ready.rc == 0
+
+    # ==========================================
+    # Configure kubectl
+    # ==========================================
+    - name: Create .kube directory
+      file:
+        path: /root/.kube
+        state: directory
+        mode: "0755"
+
+    - name:  Copy kubeconfig to .kube/config
+      copy:
+        src: "{{ kubeconfig_path }}"
+        dest: /root/.kube/config
+        remote_src: yes
+        mode:  "0600"
+
+    - name: Update kubeconfig server address
+      replace:
+        path: /root/.kube/config
+        regexp:  '127.0.0.1'
+        replace: "{{ ansible_host }}"
+
+    - name: Add KUBECONFIG to bashrc
+      lineinfile:
+        path: /root/.bashrc
+        line: 'export KUBECONFIG=/root/.kube/config'
+        create: yes
+
+    # ==========================================
+    # Install Helm
+    # ==========================================
+    - name: Check if Helm is installed
+      command: helm version --short
+      register: helm_check
+      ignore_errors: yes
+      changed_when: false
+
+    - name: Download Helm install script
+      get_url: 
+        url: https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3
+        dest: /tmp/get_helm.sh
+        mode: "0755"
+      when: helm_check.rc != 0
+
+    - name: Install Helm
+      command: /tmp/get_helm.sh
+      args:
+        creates: "{{ helm_install_path }}"
+      when: helm_check.rc != 0
+      environment:
+        DESIRED_VERSION: "{{ helm_version }}"
+
+    # ==========================================
+    # Install cert-manager
+    # ==========================================
+    - name: Add Jetstack Helm repo
+      shell: |
+        export KUBECONFIG={{ kubeconfig_path }}
+        helm repo add jetstack https://charts.jetstack.io --force-update
+        helm repo update
+      args:
+        executable: /bin/bash
+
+    - name: Check if cert-manager namespace exists
+      shell: |
+        export KUBECONFIG={{ kubeconfig_path }}
+        kubectl get namespace cert-manager
+      register: cert_manager_ns
+      ignore_errors: yes
+      changed_when: false
+
+    - name: Install cert-manager
+      shell: |
+        export KUBECONFIG={{ kubeconfig_path }}
+        helm upgrade --install cert-manager jetstack/cert-manager \
+          --namespace cert-manager \
+          --create-namespace \
+          --version v{{ cert_manager_version }} \
+          --set installCRDs=true \
+          --wait --timeout 10m
+      args:
+        executable: /bin/bash
+      when: cert_manager_ns.rc != 0
+
+    - name: Wait for cert-manager to be ready
+      shell: |
+        export KUBECONFIG={{ kubeconfig_path }}
+        kubectl wait --for=condition=Available deployment --all -n cert-manager --timeout=300s
+      args:
+        executable:  /bin/bash
+      retries: 5
+      delay: 30
+      register: cert_manager_ready
+      until: cert_manager_ready.rc == 0
+
+    # ==========================================
+    # Install Rancher Server
+    # ==========================================
+    - name:  Add Rancher Helm repo
+      shell: |
+        export KUBECONFIG={{ kubeconfig_path }}
+        helm repo add rancher-stable {{ rancher_helm_repository }} --force-update
+        helm repo update
+      args:
+        executable: /bin/bash
+
+    - name: Check if Rancher is installed
+      shell: |
+        export KUBECONFIG={{ kubeconfig_path }}
+        helm list -n cattle-system | grep -w rancher
+      register: rancher_installed
+      ignore_errors: yes
+      changed_when: false
+
+    - name: Install Rancher Server
+      shell: |
+        export KUBECONFIG={{ kubeconfig_path }}
+        helm upgrade --install rancher rancher-stable/rancher \
+          --namespace cattle-system \
+          --create-namespace \
+          --version {{ rancher_version }} \
+          --set hostname={{ rancher_server_dns }} \
+          --set replicas=1 \
+          --set bootstrapPassword={{ rancher_bootstrap_password }} \
+          --set ingress.tls.source=rancher \
+          --wait --timeout 15m
+      args:
+        executable: /bin/bash
+      when: rancher_installed.rc != 0
+      register: rancher_install_result
+
+    - name: Wait for Rancher deployment to be ready
+      shell: |
+        export KUBECONFIG={{ kubeconfig_path }}
+        kubectl -n cattle-system rollout status deploy/rancher --timeout=600s
+      args:
+        executable: /bin/bash
+      retries: 10
+      delay: 60
+      register: rancher_ready
+      until: rancher_ready.rc == 0
+      ignore_errors: yes
+
+    # ==========================================
+    # Wait for Rancher to be fully operational
+    # ==========================================
+    - name: Wait for Rancher URL to be accessible
+      uri:
+        url:  "https://{{ rancher_server_dns }}/ping"
+        validate_certs: no
+        status_code: 200
+      register: rancher_ping
+      retries: 30
+      delay:  20
+      until: rancher_ping.status == 200
+      ignore_errors: yes
+
+    # ==========================================
+    # Verification & Status
+    # ==========================================
+    - name: Get K3s version
+      command: k3s --version
+      register: k3s_version_result
+      changed_when: false
+
+    - name: Get Helm version
+      command: helm version --short
+      register: helm_version_result
+      changed_when:  false
+
+    - name: Get Kubernetes nodes
+      shell: |
+        export KUBECONFIG={{ kubeconfig_path }}
+        kubectl get nodes -o wide
+      register: k8s_nodes
+      changed_when: false
+
+    - name: Get Rancher pods
+      shell: |
+        export KUBECONFIG={{ kubeconfig_path }}
+        kubectl get pods -n cattle-system
+      register: rancher_pods
+      changed_when: false
+      ignore_errors: yes
+
+    - name: Get all namespaces
+      shell: |
+        export KUBECONFIG={{ kubeconfig_path }}
+        kubectl get namespaces
+      register: k8s_namespaces
+      changed_when:  false
+
+    # ==========================================
+    # Display Installation Summary
+    # ==========================================
+    - name: Display Installation Summary
+      debug:
+        msg: 
+          - "==========================================================="
+          - "          RANCHER INSTALLATION COMPLETE!"
+          - "==========================================================="
+          - ""
+          - "SERVER INFORMATION:"
+          - "  Hostname: {{ ansible_hostname }}"
+          - "  IP Address: {{ ansible_host }}"
+          - "  OS: {{ ansible_distribution }} {{ ansible_distribution_version }}"
+          - ""
+          - "INSTALLED VERSIONS:"
+          - "  K3s: {{ k3s_version_result.stdout_lines[0] | default('Unknown') }}"
+          - "  Helm: {{ helm_version_result.stdout | default('Unknown') }}"
+          - "  Rancher:  {{ rancher_version }}"
+          - "  cert-manager: {{ cert_manager_version }}"
+          - ""
+          - "KUBERNETES NODES:"
+          - "{{ k8s_nodes.stdout_lines | default(['Not available']) }}"
+          - ""
+          - "RANCHER PODS:"
+          - "{{ rancher_pods.stdout_lines | default(['Not available']) }}"
+          - ""
+          - "==========================================================="
+          - "          RANCHER ACCESS INFORMATION"
+          - "==========================================================="
+          - ""
+          - "  URL: https://{{ rancher_server_dns }}"
+          - "  Alternative URL: https://{{ ansible_host }}"
+          - ""
+          - "  Bootstrap Password: {{ rancher_bootstrap_password }}"
+          - ""
+          - "==========================================================="
+          - "          NEXT STEPS"
+          - "==========================================================="
+          - ""
+          - "1. Open browser and go to:"
+          - "   https://{{ rancher_server_dns }}"
+          - ""
+          - "2. Accept the self-signed certificate warning"
+          - ""
+          - "3. Login with:"
+          - "   - Bootstrap Password: {{ rancher_bootstrap_password }}"
+          - ""
+          - "4. Set your new admin password (min 12 characters)"
+          - ""
+          - "5. Set the Rancher Server URL when prompted"
+          - ""
+          - "==========================================================="
+
+    # - name: Save access information to file
+    #   copy:
+    #     dest: /root/rancher-access-info.txt
+    #     content: |
+    - name: Set access info content
+      set_fact:
+        rancher_access_info: |
+          ===========================================================
+          RANCHER ACCESS INFORMATION
+          ===========================================================
+          
+          Server:  {{ ansible_hostname }}
+          IP Address: {{ ansible_host }}
+          
+          Rancher URL: https://{{ rancher_server_dns }}
+          # Alternative URL: https://{{ ansible_host }}
+          
+          Bootstrap Password: {{ rancher_bootstrap_password }}
+          
+          ===========================================================
+          KUBECONFIG
+          ===========================================================
+          Location: /root/.kube/config
+          K3s Config: {{ kubeconfig_path }}
+          
+          ===========================================================
+          USEFUL COMMANDS
+          ===========================================================
+          
+          # Check Rancher status
+          kubectl get pods -n cattle-system
+          
+          # Check Rancher logs
+          kubectl logs -n cattle-system -l app=rancher -f
+          
+          # Check all pods
+          kubectl get pods -A
+          
+          # Check nodes
+          kubectl get nodes
+          
+          # Check services
+          kubectl get svc -A
+          
+          # Check ingress
+          kubectl get ingress -A
+          
+          ===========================================================
+        mode: "0600"
+
+    - name: Display final message
+      debug:
+        msg: 
+          - ""
+          - "✅ Installation completed successfully!"
+          - ""
+          - "🌐 Access Rancher at: https://{{ rancher_server_dns }}"
+          - "🔑 Bootstrap Password: {{ rancher_bootstrap_password }}"
+          - ""
+
+    - name: Save access information to remote server
+      copy:
+        dest: /root/rancher-access-info.txt
+        content: "{{ rancher_access_info }}"
+        mode: "0600"
+
+    - name: Save access information to local machine
+      delegate_to: localhost
+      become: no
+      copy:
+        dest: ./rancher/rancher-access-info.txt
+        content: "{{ rancher_access_info }}"
+        mode: "0644"

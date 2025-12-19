@@ -1,0 +1,445 @@
+---
+# ===========================================
+# Ansible Playbook:  Install K3s + Rancher (Single & Multi-Node)
+# Based on: https://github.com/rancher/quickstart
+# ===========================================
+
+- name: Install K3s and Rancher Server
+  hosts: os_servers
+  become: yes
+  gather_facts: yes
+  
+  vars:
+    # K3s Version
+    k3s_version: "v1.33.6+k3s1"
+    
+    # Rancher Configuration
+    rancher_version: "v2.13.1"
+    cert_manager_version: "1.19.2"
+    helm_version: "v3.19.4"
+    rancher_helm_repository: "https://releases.rancher.com/server-charts/stable"
+    
+    # Admin password (min 12 characters)
+    rancher_bootstrap_password: "admin"
+    
+    # Paths
+    kubeconfig_path:  "/etc/rancher/k3s/k3s.yaml"
+    k3s_token_path: "/var/lib/rancher/k3s/server/node-token"
+    
+    # Master node (first host in inventory)
+    master_node:  "{{ groups['os_servers'][0] }}"
+    master_ip: "{{ hostvars[groups['os_servers'][0]]['ansible_host'] }}"
+    
+    # Rancher DNS
+    rancher_server_dns: "{{ master_ip }}.nip.io"
+    
+    # OS Family
+    supported_debian_family: "Debian"
+    supported_redhat_family: "RedHat"
+
+  tasks:
+    # ==========================================
+    # System Prerequisites (All Nodes)
+    # ==========================================
+    - name: "[Debian/Ubuntu] Update apt cache"
+      apt:
+        update_cache: yes
+        cache_valid_time: 3600
+      when: ansible_os_family == supported_debian_family
+
+    - name: "[Debian/Ubuntu] Install prerequisites"
+      apt:
+        name:
+          - curl
+          - wget
+          - git
+          - jq
+          - apt-transport-https
+          - ca-certificates
+          - gnupg
+          - open-iscsi
+          - nfs-common
+        state: present
+      when: ansible_os_family == supported_debian_family
+
+    - name: "[RedHat] Install prerequisites"
+      yum: 
+        name:
+          - curl
+          - wget
+          - git
+          - jq
+          - ca-certificates
+          - iscsi-initiator-utils
+          - nfs-utils
+        state: present
+      when: ansible_os_family == supported_redhat_family
+
+    # ==========================================
+    # Install K3s Master (First Node Only)
+    # ==========================================
+    - name: Check if K3s is installed
+      command: k3s --version
+      register: k3s_check
+      ignore_errors:  yes
+      changed_when: false
+
+    - name: "[MASTER] Install K3s Server"
+      shell: |
+        curl -sfL https://get.k3s.io | \
+        INSTALL_K3S_VERSION="{{ k3s_version }}" \
+        INSTALL_K3S_EXEC="server \
+          --node-external-ip {{ ansible_host }} \
+          --node-ip {{ ansible_default_ipv4.address | default(ansible_host) }} \
+          --tls-san {{ ansible_host }} \
+          --tls-san {{ rancher_server_dns }} \
+          --write-kubeconfig-mode 644" \
+        sh -
+      args:
+        executable: /bin/bash
+        creates: /usr/local/bin/k3s
+      when: 
+        - k3s_check.rc != 0
+        - inventory_hostname == master_node
+
+    - name: "[MASTER] Wait for K3s to be ready"
+      wait_for:
+        path: "{{ kubeconfig_path }}"
+        state: present
+        timeout: 120
+      when: inventory_hostname == master_node
+
+    - name: "[MASTER] Wait for K3s node to be ready"
+      shell: |
+        export KUBECONFIG={{ kubeconfig_path }}
+        kubectl wait --for=condition=Ready nodes --all --timeout=300s
+      args: 
+        executable: /bin/bash
+      retries: 10
+      delay:  15
+      register: k3s_ready
+      until: k3s_ready.rc == 0
+      when: inventory_hostname == master_node
+
+    - name: "[MASTER] Get K3s token"
+      slurp:
+        src: "{{ k3s_token_path }}"
+      register:  k3s_token_raw
+      when: inventory_hostname == master_node
+
+    - name: "[MASTER] Set K3s token fact"
+      set_fact: 
+        k3s_token: "{{ k3s_token_raw.content | b64decode | trim }}"
+      when: inventory_hostname == master_node
+
+    # ==========================================
+    # Share K3s Token to All Nodes
+    # ==========================================
+    - name: Share K3s token across all hosts
+      set_fact:
+        k3s_cluster_token: "{{ hostvars[master_node]['k3s_token'] }}"
+
+    # ==========================================
+    # Install K3s Agent (Worker Nodes Only)
+    # ==========================================
+    - name: "[WORKER] Install K3s Agent"
+      shell: |
+        curl -sfL https://get.k3s.io | \
+        INSTALL_K3S_VERSION="{{ k3s_version }}" \
+        K3S_URL="https://{{ master_ip }}:6443" \
+        K3S_TOKEN="{{ k3s_cluster_token }}" \
+        INSTALL_K3S_EXEC="agent \
+          --node-external-ip {{ ansible_host }} \
+          --node-ip {{ ansible_default_ipv4.address | default(ansible_host) }}" \
+        sh -
+      args:
+        executable: /bin/bash
+        creates: /usr/local/bin/k3s
+      when: 
+        - k3s_check.rc != 0
+        - inventory_hostname != master_node
+
+    - name: "[WORKER] Wait for K3s agent to start"
+      systemd:
+        name: k3s-agent
+        state: started
+        enabled: yes
+      when: inventory_hostname != master_node
+      ignore_errors: yes
+
+    # ==========================================
+    # Configure kubectl (Master Only)
+    # ==========================================
+    - name: "[MASTER] Create .kube directory"
+      file:
+        path: /root/.kube
+        state: directory
+        mode: "0755"
+      when: inventory_hostname == master_node
+
+    - name: "[MASTER] Copy kubeconfig"
+      copy:
+        src:  "{{ kubeconfig_path }}"
+        dest: /root/.kube/config
+        remote_src: yes
+        mode: "0600"
+      when: inventory_hostname == master_node
+
+    - name: "[MASTER] Update kubeconfig server address"
+      replace:
+        path: /root/.kube/config
+        regexp:  '127.0.0.1'
+        replace: "{{ ansible_host }}"
+      when:  inventory_hostname == master_node
+
+    - name: "[MASTER] Add KUBECONFIG to bashrc"
+      lineinfile:
+        path: /root/.bashrc
+        line: 'export KUBECONFIG=/root/.kube/config'
+        create: yes
+      when: inventory_hostname == master_node
+
+    # ==========================================
+    # Install Helm (Master Only)
+    # ==========================================
+    - name:  "[MASTER] Check if Helm is installed"
+      command: helm version --short
+      register: helm_check
+      ignore_errors: yes
+      changed_when: false
+      when: inventory_hostname == master_node
+
+    - name: "[MASTER] Download Helm install script"
+      get_url: 
+        url: https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3
+        dest: /tmp/get_helm.sh
+        mode: "0755"
+      when: 
+        - inventory_hostname == master_node
+        - helm_check.rc != 0
+
+    - name: "[MASTER] Install Helm"
+      command: /tmp/get_helm.sh
+      args:
+        creates: /usr/local/bin/helm
+      when: 
+        - inventory_hostname == master_node
+        - helm_check.rc != 0
+      environment:
+        DESIRED_VERSION: "{{ helm_version }}"
+
+    # ==========================================
+    # Install cert-manager (Master Only)
+    # ==========================================
+    - name: "[MASTER] Add Jetstack Helm repo"
+      shell: |
+        export KUBECONFIG={{ kubeconfig_path }}
+        helm repo add jetstack https://charts.jetstack.io --force-update
+        helm repo update
+      args:
+        executable: /bin/bash
+      when:  inventory_hostname == master_node
+
+    - name: "[MASTER] Check if cert-manager is installed"
+      shell: |
+        export KUBECONFIG={{ kubeconfig_path }}
+        kubectl get namespace cert-manager
+      register: cert_manager_ns
+      ignore_errors: yes
+      changed_when: false
+      when: inventory_hostname == master_node
+
+    - name: "[MASTER] Install cert-manager"
+      shell: |
+        export KUBECONFIG={{ kubeconfig_path }}
+        helm upgrade --install cert-manager jetstack/cert-manager \
+          --namespace cert-manager \
+          --create-namespace \
+          --version v{{ cert_manager_version }} \
+          --set installCRDs=true \
+          --wait --timeout 10m
+      args:
+        executable: /bin/bash
+      when:
+        - inventory_hostname == master_node
+        - cert_manager_ns.rc != 0
+
+    - name: "[MASTER] Wait for cert-manager"
+      shell: |
+        export KUBECONFIG={{ kubeconfig_path }}
+        kubectl wait --for=condition=Available deployment --all -n cert-manager --timeout=300s
+      args:
+        executable: /bin/bash
+      retries: 5
+      delay: 30
+      register: cert_manager_ready
+      until: cert_manager_ready.rc == 0
+      when: inventory_hostname == master_node
+
+    # ==========================================
+    # Install Rancher Server (Master Only)
+    # ==========================================
+    - name: "[MASTER] Add Rancher Helm repo"
+      shell: |
+        export KUBECONFIG={{ kubeconfig_path }}
+        helm repo add rancher-stable {{ rancher_helm_repository }} --force-update
+        helm repo update
+      args:
+        executable: /bin/bash
+      when: inventory_hostname == master_node
+
+    - name: "[MASTER] Check if Rancher is installed"
+      shell: |
+        export KUBECONFIG={{ kubeconfig_path }}
+        helm list -n cattle-system | grep -w rancher
+      register: rancher_installed
+      ignore_errors: yes
+      changed_when: false
+      when: inventory_hostname == master_node
+
+    - name: "[MASTER] Install Rancher Server"
+      shell: |
+        export KUBECONFIG={{ kubeconfig_path }}
+        helm upgrade --install rancher rancher-stable/rancher \
+          --namespace cattle-system \
+          --create-namespace \
+          --version {{ rancher_version }} \
+          --set hostname={{ rancher_server_dns }} \
+          --set replicas=1 \
+          --set bootstrapPassword={{ rancher_bootstrap_password }} \
+          --set ingress.tls.source=rancher \
+          --wait --timeout 15m
+      args:
+        executable: /bin/bash
+      when:
+        - inventory_hostname == master_node
+        - rancher_installed.rc != 0
+
+    - name: "[MASTER] Wait for Rancher to be ready"
+      shell: |
+        export KUBECONFIG={{ kubeconfig_path }}
+        kubectl -n cattle-system rollout status deploy/rancher --timeout=600s
+      args:
+        executable: /bin/bash
+      retries: 10
+      delay: 60
+      register: rancher_ready
+      until: rancher_ready.rc == 0
+      when: inventory_hostname == master_node
+      ignore_errors: yes
+
+    # ==========================================
+    # Wait for All Nodes (Master Only)
+    # ==========================================
+    - name: "[MASTER] Wait for all nodes to join cluster"
+      shell: |
+        export KUBECONFIG={{ kubeconfig_path }}
+        kubectl get nodes
+      args:
+        executable: /bin/bash
+      register: all_nodes
+      retries: 10
+      delay: 30
+      until: all_nodes.rc == 0
+      when: inventory_hostname == master_node
+
+    # ==========================================
+    # Verification (Master Only)
+    # ==========================================
+    - name: "[MASTER] Get cluster nodes"
+      shell: |
+        export KUBECONFIG={{ kubeconfig_path }}
+        kubectl get nodes -o wide
+      register: k8s_nodes
+      changed_when: false
+      when:  inventory_hostname == master_node
+
+    - name: "[MASTER] Get Rancher pods"
+      shell: |
+        export KUBECONFIG={{ kubeconfig_path }}
+        kubectl get pods -n cattle-system
+      register: rancher_pods
+      changed_when: false
+      when: inventory_hostname == master_node
+      ignore_errors: yes
+
+    # ==========================================
+    # Display Summary (Master Only)
+    # ==========================================
+    - name: Display Installation Summary
+      debug:
+        msg: 
+          - "==========================================================="
+          - "          RANCHER INSTALLATION COMPLETE!"
+          - "==========================================================="
+          - ""
+          - "CLUSTER NODES:"
+          - "{{ k8s_nodes.stdout_lines | default(['Not available']) }}"
+          - ""
+          - "RANCHER PODS:"
+          - "{{ rancher_pods.stdout_lines | default(['Not available']) }}"
+          - ""
+          - "==========================================================="
+          - "          RANCHER ACCESS"
+          - "==========================================================="
+          - ""
+          - "  URL: https://{{ rancher_server_dns }}"
+          - "  Alternative: https://{{ master_ip }}"
+          - "  Bootstrap Password: {{ rancher_bootstrap_password }}"
+          - ""
+          - "==========================================================="
+      when: inventory_hostname == master_node
+
+    # - name: "[MASTER] Save access information"
+    #   copy:
+    #     dest: /root/rancher-access-info.txt
+    #     content: |
+    - name: Set access info content
+      set_fact:
+        rancher_access_info: |
+          ===========================================================
+          RANCHER CLUSTER INFORMATION
+          ===========================================================
+          
+          Master Node: {{ master_ip }}
+          Rancher URL: https://{{ rancher_server_dns }}
+          Bootstrap Password: {{ rancher_bootstrap_password }}
+          
+          ===========================================================
+          CLUSTER NODES
+          ===========================================================
+          {{ k8s_nodes.stdout | default('Not available') }}
+          
+          ===========================================================
+          USEFUL COMMANDS
+          ===========================================================
+          
+          # Check nodes
+          kubectl get nodes -o wide
+          
+          # Check Rancher pods
+          kubectl get pods -n cattle-system
+          
+          # Check all pods
+          kubectl get pods -A
+          
+          # Get node token (for adding more workers)
+          cat /var/lib/rancher/k3s/server/node-token
+          
+          ===========================================================
+        mode: "0600"
+      when: inventory_hostname == master_node
+
+    - name: "[MASTER] Save access information to remote server"
+      copy:
+        dest: /root/rancher-access-info.txt
+        content: "{{ rancher_access_info }}"
+        mode: "0600"
+
+    - name: "[MASTER] Save access information to local machine"
+      delegate_to: localhost
+      become: no
+      copy:
+        dest: ./rancher/rancher-access-info.txt
+        content: "{{ rancher_access_info }}"
+        mode: "0644"

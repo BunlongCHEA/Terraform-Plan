@@ -75,6 +75,7 @@ cd ./digitalocean
 ```
 
 On Terminal:
+
 - Choose Option **1** for run Entire Flow
 ![Terminal Terraform Run - Full Run Entire Flow](/images/terraform-run_full-run.png)
 
@@ -130,7 +131,7 @@ chmod 644 ~/.ssh/id_rsa_digitalocean.pub
 ls -la ~/.ssh/
 
 # Test SSH
-ssh -i ~/.ssh/id_rsa_digitalocean root@139.59.229.28
+ssh -i ~/.ssh/id_rsa_digitalocean root@174.138.21.129
 ```
 
 # OTHER: Clean-Up Any Partial Resources (if needed)
@@ -154,3 +155,30 @@ terraform apply
 So in short, NO need to Login Official DigitalOcean Website, and Destroy
 
 ![SSH Fail - Bad Permissions](/images/ssh-fail__bad-permission.png)
+
+## Verify Kubectl Command
+
+### How to Check Pod Logs
+
+List all pod logs
+```bash
+kubectl get pods -A
+```
+
+Check pod logs
+```bash
+kubectl logs -n cattle-system rancher-84d4764864-2c99q
+```
+![Kubectl - Check Pod Logs](/images/kubectl-check-pod-logs.png)
+
+Describe Pod for Events
+```bash
+kubectl describe pod -n cattle-system rancher-84d4764864-2c99q
+```
+
+Check Node Resources
+```bash
+kubectl top nodes
+kubectl top pods -A
+```
+![Kubectl - Check Resource Consume By Pods](/images/kubectl-check-all-resource-consume.png)
