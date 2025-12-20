@@ -24,17 +24,24 @@
     cert_manager_version: "1.19.2"
     helm_version: "v3.19.4"
     rancher_helm_repository: "https://releases.rancher.com/server-charts/stable"
-    
+
+    # Domain Configuration (from Terraform or override here)
+    # rancher_domain:  "{{ rancher_domain }}"
+    # admin_email: "{{ admin_email }}"
+
     # Rancher Server DNS (uses nip.io for automatic DNS resolution)
     rancher_server_dns: "{{ ansible_host }}.nip.io"
     
     # Admin password (min 12 characters) - CHANGE THIS!
-    rancher_admin_password: "adminPassword123"
+    # rancher_admin_password: "adminPassword123"
     rancher_bootstrap_password: "admin"
     
     # Paths
     kubeconfig_path: "/etc/rancher/k3s/k3s.yaml"
     helm_install_path: "/usr/local/bin/helm"
+
+    # Certificate templates directory
+    cert_templates_dir: "./certificate"
     
     # Workload cluster (optional)
     workload_cluster_name: "quickstart-workload"
@@ -197,7 +204,7 @@
         DESIRED_VERSION: "{{ helm_version }}"
 
     # ==========================================
-    # Install cert-manager
+    # Install cert-manager (Required for Let's Encrypt)
     # ==========================================
     - name: Add Jetstack Helm repo
       shell: |
@@ -240,6 +247,59 @@
       until: cert_manager_ready.rc == 0
 
     # ==========================================
+    # Configure Cloudflare DNS Challenge
+    # ==========================================
+    - name: Create temporary directory for certificate manifests
+      file:
+        path: /tmp/cert-manifests
+        state: directory
+        mode: "0755"
+
+    # - name: Copy Cloudflare secret with variables to remote
+    #   template:
+    #     src: "{{ cert_templates_dir }}/cloudflare-secret.yml.j2"
+    #     dest:  /tmp/cert-manifests/cloudflare-secret.yml
+    #     mode: "0600"
+
+    - name: Copy ClusterIssuer with variables to remote
+      template:
+        src: "{{ cert_templates_dir }}/clusterissuer-letsencrypt.yml.j2"
+        dest: /tmp/cert-manifests/clusterissuer-letsencrypt.yml
+        mode: "0644"
+
+    - name: Copy Rancher Ingress with variables to remote
+      template:
+        src:  "{{ cert_templates_dir }}/rancher-ingress.yml.j2"
+        dest: /tmp/cert-manifests/rancher-ingress.yml
+        mode: "0644"
+
+    # - name: Apply Cloudflare API Token Secret
+    #   shell: |
+    #     export KUBECONFIG={{ kubeconfig_path }}
+    #     kubectl apply -f /tmp/cert-manifests/cloudflare-secret.yml
+    #   args:
+    #     executable: /bin/bash
+
+    - name: Apply Let's Encrypt ClusterIssuer
+      shell:  |
+        export KUBECONFIG={{ kubeconfig_path }}
+        kubectl apply -f /tmp/cert-manifests/clusterissuer-letsencrypt.yml
+      args:
+        executable: /bin/bash
+
+    - name: Wait for ClusterIssuer to be ready
+      shell: |
+        export KUBECONFIG={{ kubeconfig_path }}
+        kubectl wait --for=condition=Ready clusterissuer/letsencrypt-prod --timeout=10s
+      args:
+        executable: /bin/bash
+      retries: 5
+      delay: 10
+      register: issuer_ready
+      until: issuer_ready.rc == 0
+      ignore_errors: yes
+
+    # ==========================================
     # Install Rancher Server
     # ==========================================
     - name:  Add Rancher Helm repo
@@ -258,17 +318,36 @@
       ignore_errors: yes
       changed_when: false
 
-    - name: Install Rancher Server
+    # - name: Install Rancher Server
+    #   shell: |
+    #     export KUBECONFIG={{ kubeconfig_path }}
+    #     helm upgrade --install rancher rancher-stable/rancher \
+    #       --namespace cattle-system \
+    #       --create-namespace \
+    #       --version {{ rancher_version }} \
+    #       --set hostname={{ rancher_server_dns }} \
+    #       --set replicas=1 \
+    #       --set bootstrapPassword={{ rancher_bootstrap_password }} \
+    #       --set ingress.tls.source=rancher \
+    #       --wait --timeout 15m
+    #   args:
+    #     executable: /bin/bash
+    #   when: rancher_installed.rc != 0
+    #   register: rancher_install_result
+
+    - name: Install Rancher Server with Let's Encrypt
       shell: |
         export KUBECONFIG={{ kubeconfig_path }}
         helm upgrade --install rancher rancher-stable/rancher \
           --namespace cattle-system \
           --create-namespace \
           --version {{ rancher_version }} \
-          --set hostname={{ rancher_server_dns }} \
+          --set hostname={{ rancher_domain }} \
           --set replicas=1 \
           --set bootstrapPassword={{ rancher_bootstrap_password }} \
-          --set ingress.tls.source=rancher \
+          --set ingress.tls.source=secret \
+          --set ingress.extraAnnotations."cert-manager\.io/cluster-issuer"=letsencrypt-prod \
+          --set privateCA=false \
           --wait --timeout 15m
       args:
         executable: /bin/bash
@@ -288,18 +367,60 @@
       ignore_errors: yes
 
     # ==========================================
+    # Verify Certificate
+    # ==========================================
+    - name: Wait for certificate to be issued
+      shell: |
+        export KUBECONFIG={{ kubeconfig_path }}
+        kubectl get certificate -n cattle-system
+      args:
+        executable: /bin/bash
+      register: cert_status
+      retries: 30
+      delay: 20
+      until: "'True' in cert_status.stdout"
+      ignore_errors: yes
+
+    - name: Check certificate status
+      shell: |
+        export KUBECONFIG={{ kubeconfig_path }}
+        kubectl describe certificate -n cattle-system
+      args:
+        executable: /bin/bash
+      register: cert_details
+      changed_when: false
+      ignore_errors: yes
+
+    # ==========================================
     # Wait for Rancher to be fully operational
     # ==========================================
     - name: Wait for Rancher URL to be accessible
       uri:
-        url:  "https://{{ rancher_server_dns }}/ping"
+        # url:  "https://{{ rancher_server_dns }}/ping"
+        # url: "https://{{ rancher_domain }}/ping"
+        url:  "https://{{ ansible_host }}/ping"
         validate_certs: no
         status_code: 200
       register: rancher_ping
-      retries: 30
-      delay:  20
+      retries: 5
+      delay:  10
       until: rancher_ping.status == 200
       ignore_errors: yes
+
+    # ==========================================
+    # Cleanup sensitive files
+    # ==========================================
+    - name: Remove temporary certificate manifests from remote
+      file:
+        path: /tmp/cert-manifests
+        state: absent
+
+    # - name: Remove temporary certificate manifests from local
+    #   file:
+    #     path: /tmp/cert-manifests
+    #     state: absent
+    #   delegate_to: localhost
+    #   become: no
 
     # ==========================================
     # Verification & Status
@@ -312,7 +433,7 @@
     - name: Get Helm version
       command: helm version --short
       register: helm_version_result
-      changed_when:  false
+      changed_when: false
 
     - name: Get Kubernetes nodes
       shell: |
@@ -329,12 +450,21 @@
       changed_when: false
       ignore_errors: yes
 
-    - name: Get all namespaces
+    - name: Get certificate status
       shell: |
         export KUBECONFIG={{ kubeconfig_path }}
-        kubectl get namespaces
-      register: k8s_namespaces
+        kubectl get certificate -n cattle-system -o wide
+      register: cert_status_final
+      changed_when: false
+      ignore_errors: yes
+
+    - name: Get ingress status
+      shell: |
+        export KUBECONFIG={{ kubeconfig_path }}
+        kubectl get ingress -n cattle-system -o wide
+      register: ingress_status
       changed_when:  false
+      ignore_errors: yes
 
     # ==========================================
     # Display Installation Summary
@@ -363,12 +493,20 @@
           - "RANCHER PODS:"
           - "{{ rancher_pods.stdout_lines | default(['Not available']) }}"
           - ""
+          - "TLS CERTIFICATE:"
+          - "{{ cert_status_final.stdout_lines | default(['Not available']) }}"
+          - ""
+          - "INGRESS:"
+          - "{{ ingress_status.stdout_lines | default(['Not available']) }}"
+          - ""
           - "==========================================================="
           - "          RANCHER ACCESS INFORMATION"
           - "==========================================================="
           - ""
-          - "  URL: https://{{ rancher_server_dns }}"
-          - "  Alternative URL: https://{{ ansible_host }}"
+          - "  # Insecure Rancher URL: https://{{ rancher_server_dns }}"
+          - "  # (Accept the self-signed certificate warning)"
+          - "  URL: https://{{ rancher_domain }}"
+          - "  (Secured with Let's Encrypt SSL Certificate)"
           - ""
           - "  Bootstrap Password: {{ rancher_bootstrap_password }}"
           - ""
@@ -377,16 +515,14 @@
           - "==========================================================="
           - ""
           - "1. Open browser and go to:"
-          - "   https://{{ rancher_server_dns }}"
+          - "   https://{{ rancher_domain }}"
           - ""
-          - "2. Accept the self-signed certificate warning"
+          - "2. SSL Certificate should be valid (no warnings! )"
           - ""
           - "3. Login with:"
           - "   - Bootstrap Password: {{ rancher_bootstrap_password }}"
           - ""
           - "4. Set your new admin password (min 12 characters)"
-          - ""
-          - "5. Set the Rancher Server URL when prompted"
           - ""
           - "==========================================================="
 
@@ -404,10 +540,18 @@
           Server:  {{ ansible_hostname }}
           IP Address: {{ ansible_host }}
           
-          Rancher URL: https://{{ rancher_server_dns }}
-          # Alternative URL: https://{{ ansible_host }}
+          # Insecure Rancher URL: https://{{ rancher_server_dns }}
+          Rancher URL: https://{{ rancher_domain }}
+          (Secured with Let's Encrypt SSL Certificate)
           
           Bootstrap Password: {{ rancher_bootstrap_password }}
+
+          ===========================================================
+          TLS CERTIFICATE
+          ===========================================================
+          Issuer: Let's Encrypt (letsencrypt-prod)
+          DNS Provider: Cloudflare
+          Challenge Type: DNS-01
           
           ===========================================================
           KUBECONFIG
@@ -424,6 +568,16 @@
           
           # Check Rancher logs
           kubectl logs -n cattle-system -l app=rancher -f
+
+          # Check certificate status
+          kubectl get certificate -n cattle-system
+          kubectl describe certificate -n cattle-system
+
+          # Check cert-manager logs
+          kubectl logs -n cert-manager -l app=cert-manager -f
+          
+          # Check ClusterIssuer status
+          kubectl describe clusterissuer letsencrypt-prod
           
           # Check all pods
           kubectl get pods -A
@@ -440,16 +594,6 @@
           ===========================================================
         mode: "0600"
 
-    - name: Display final message
-      debug:
-        msg: 
-          - ""
-          - "✅ Installation completed successfully!"
-          - ""
-          - "🌐 Access Rancher at: https://{{ rancher_server_dns }}"
-          - "🔑 Bootstrap Password: {{ rancher_bootstrap_password }}"
-          - ""
-
     - name: Save access information to remote server
       copy:
         dest: /root/rancher-access-info.txt
@@ -463,3 +607,24 @@
         dest: ./rancher/rancher-access-info.txt
         content: "{{ rancher_access_info }}"
         mode: "0644"
+
+    # - name: Display final message
+    #   debug:
+    #     msg: 
+    #       - ""
+    #       - "✅ Installation completed successfully!"
+    #       - ""
+    #       - "🌐 Access Rancher at: https://{{ rancher_server_dns }}"
+    #       - "🔑 Bootstrap Password: {{ rancher_bootstrap_password }}"
+    #       - ""
+
+    - name: Display final message
+      debug:
+        msg: 
+          - ""
+          - "✅ Installation completed successfully!"
+          - ""
+          - "🌐 Access Rancher at: https://{{ rancher_domain }}"
+          - "🔒 SSL: Let's Encrypt (Valid Certificate)"
+          - "🔑 Bootstrap Password: {{ rancher_bootstrap_password }}"
+          - ""

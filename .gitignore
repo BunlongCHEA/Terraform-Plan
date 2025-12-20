@@ -6,3 +6,4 @@
 /digitalocean/output/*
 /digitalocean/rancher/*
 /digitalocean/run_ansible.bat
+/digitalocean/group_vars/all.yml

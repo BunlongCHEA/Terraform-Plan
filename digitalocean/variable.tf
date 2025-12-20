@@ -45,3 +45,27 @@ variable "project_name" {
   type        = string
   default     = "ansible-lab"
 }
+
+
+# # Cloudflare Configuration
+# variable "cloudflare_api_token" {
+#   description = "Cloudflare API token for DNS-01 challenge"
+#   type        = string
+#   sensitive   = true
+# }
+
+# variable "cloudflare_email" {
+#   description = "Cloudflare account email"
+#   type        = string
+# }
+
+# variable "rancher_domain" {
+#   description = "Domain for Rancher server"
+#   type        = string
+#   default     = "rancher.bunlong.site"
+# }
+
+# variable "admin_email" {
+#   description = "Email for Let's Encrypt certificate notifications"
+#   type        = string
+# }

@@ -1,3 +1,15 @@
+# Requiement
+- Ansible
+- Terraform
+- kubernetes.core
+- **(Optional)** Cloudflare API Token for DNS Certificate with permission below:
+
+| Field | Value |
+|---|---|
+| `Permissions` | Zone - DNS - Edit |
+| `Permissions` | Zone - Zone - Read |
+| `Zone Resources` | Include - Specific zone - dns.site |
+
 # STEP 1 -- Install Terraform
 ## On Window
 
@@ -77,11 +89,11 @@ cd ./digitalocean
 On Terminal:
 
 - Choose Option **1** for run Entire Flow
-![Terminal Terraform Run - Full Run Entire Flow](/images/terraform-run_full-run.png)
+![Terminal Terraform Run - Full Run Entire Flow](/images/terraform-1.png)
 
 - Keep Write **yes** to keep installation for create Droplet & Run Ansible
 - Then wait until success installation required library
-![Terminal Terraform Run - Success Ansible Installation Library](/images/ansible-run_success-run.png)
+![Terminal Terraform Run - Success Ansible Installation Library](/images/ansible-1.png)
 
 Then verify create Droplet with Ansible or SSH command
 
@@ -149,16 +161,14 @@ terraform destroy -auto-approve
 terraform apply
 ```
 
-### Or Use -- ./terraform_run.sh -- to destroy by click Option **9** & write **yes**
+## Or Use -- ./terraform_run.sh -- to destroy by click Option **9** & write **yes**
 
 **NOTE:** **terraform destroy -auto-approve** can what created & even delete Droplet from DigitalOcean as well, just like Rollback to Original state.
 So in short, NO need to Login Official DigitalOcean Website, and Destroy
 
 ![SSH Fail - Bad Permissions](/images/ssh-fail__bad-permission.png)
 
-## Verify Kubectl Command
-
-### How to Check Pod Logs
+## Verify Kubectl Command : How to Check Pod Logs
 
 List all pod logs
 ```bash
@@ -169,7 +179,7 @@ Check pod logs
 ```bash
 kubectl logs -n cattle-system rancher-84d4764864-2c99q
 ```
-![Kubectl - Check Pod Logs](/images/kubectl-check-pod-logs.png)
+![Kubectl - Check Pod Logs](/images/kubectl-1.png)
 
 Describe Pod for Events
 ```bash
@@ -181,4 +191,49 @@ Check Node Resources
 kubectl top nodes
 kubectl top pods -A
 ```
-![Kubectl - Check Resource Consume By Pods](/images/kubectl-check-all-resource-consume.png)
+![Kubectl - Check Resource Consume By Pods](/images/kubectl-2.png)
+
+## How to Check Certificate Validity
+
+Delete certificate
+```bash
+# Delete certificate clusterissuer with name
+kubectl delete clusterissuer letsencrypt-prod
+
+# Delete existing certificate request
+kubectl delete certificaterequest -n cattle-system --all
+
+# Delete certificate
+kubectl delete certificate -n cattle-system --all
+
+# Restart cert-manager
+kubectl rollout restart deployment/cert-manager -n cert-manager
+
+# Restart Rancher to trigger new certificate request
+kubectl rollout restart deployment/rancher -n cattle-system
+```
+
+Check Certificate Status
+```bash
+kubectl get certificate -n cattle-system
+```
+![Kubectl - Check Certificate Status Success Run](/images/kubectl-3.png)
+
+- READY: True = Certificate issued successfully ✅
+- READY: False = Still pending or failed ❌
+
+Describe Certificate for Details
+```bash
+kubectl describe certificate -n cattle-system
+```
+![Kubectl - Describe Certificate Success Run with Traefik](/images/kubectl-4.png)
+
+Check CertificateRequest
+```bash
+kubectl get certificaterequest -n cattle-system
+```
+
+Get Certificate All
+```bash
+kubectl get certificate -A
+```
