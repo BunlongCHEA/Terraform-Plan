@@ -27,6 +27,8 @@ SSH_PRIVATE_KEY="$HOME/.ssh/id_rsa_digitalocean"
 INVENTORY="$SCRIPT_DIR/output/inventory.ini"
 PLAYBOOK_ANSIBLE="$SCRIPT_DIR/ansible_install_ansible.yml"
 PLAYBOOK_RANCHER="$SCRIPT_DIR/ansible_install_rancher.yml"
+PLAYBOOK_RANCHER_MULTI="$SCRIPT_DIR/ansible_install_rancher_multi.yml"
+PLAYBOOK_ARGOCD="$SCRIPT_DIR/ansible_install_argocd.yml"
 SERVER="os_servers"
 
 # ===========================================
@@ -171,7 +173,7 @@ test_ansible() {
     fi
 }
 
-# Run Ansible playbook
+# Run Ansible playbook for installing Ansible
 run_ansible_ansible() {
     print_header "Running Ansible Playbook - Install Ansible"
     
@@ -194,6 +196,7 @@ run_ansible_ansible() {
     print_success "Ansible playbook completed"
 }
 
+# Run Ansible playbook for installing Rancher
 run_ansible_rancher() {
     print_header "Running Ansible Playbook - Install K3s + Rancher"
     
@@ -238,7 +241,7 @@ run_ansible_rancher() {
             ;;
         2)
             print_info "Installing multi-node cluster..."
-            ansible-playbook -i "$INVENTORY" "$PLAYBOOK_RANCHER" -v
+            ansible-playbook -i "$INVENTORY" "$PLAYBOOK_RANCHER_MULTI" -v
             ;;
         *)
             print_info "Installing on first server only (default)..."
@@ -260,6 +263,29 @@ run_ansible_rancher() {
     echo -e "${GREEN}==========================================================${NC}"
     echo ""
     print_info "Accept the self-signed certificate in your browser"
+}
+
+# Run Ansible playbook for installing ArgoCD
+run_ansible_argocd() {
+    print_header "Running Ansible Playbook - Install ArogoCD"
+    
+    # INVENTORY="$SCRIPT_DIR/output/inventory.ini"
+    # PLAYBOOK="$SCRIPT_DIR/ansible_install_ansible.yml"
+    
+    if [ !  -f "$INVENTORY" ]; then
+        print_error "Inventory file not found: $INVENTORY"
+        print_info "Run 'terraform apply' first"
+        return 1
+    fi
+    
+    if [ ! -f "$PLAYBOOK_ARGOCD" ]; then
+        print_error "Playbook not found: $PLAYBOOK_ARGOCD"
+        return 1
+    fi
+    
+    print_info "Running playbook -- Installing ArgoCD:  $PLAYBOOK_ARGOCD"
+    ansible-playbook -i "$INVENTORY" "$PLAYBOOK_ARGOCD"
+    print_success "Ansible playbook completed"
 }
 
 # Full workflow
@@ -289,49 +315,22 @@ run_all() {
 
     echo ""
     echo "Select installation option:"
-    echo "  1) Basic software only (Python3, pip, Ansible)"
-    echo "  2) Rancher prerequisites (Go, Terraform, Docker, kubectl + clone & build)"
-    echo "  3) Both"
-    echo "  4) Skip"
+    echo "  1) Install Ansible (Python3, pip, Ansible)"
+    echo "  2) Install Rancher (Terraform, cert-manager, Kubectl, K3s, Helm)"
+    echo "  3) Install ArgoCD (ArgoCD, cert-manager)"
+    echo "  4) All of the above"
+    echo "  5) Skip"
     read -p "Choice [1-4]: " install_choice
     
     case $install_choice in
         1) run_ansible_ansible ;;
         2) run_ansible_rancher ;;
-        3) run_ansible_ansible; run_ansible_rancher ;;
-        4) print_info "Skipping software installation" ;;
+        3) run_ansible_argocd ;;
+        4) run_ansible_ansible; run_ansible_rancher ; run_ansible_argocd ;;
+        5) print_info "Skipping software installation" ;;
     esac
     
     print_header "Workflow Complete!"
-}
-
-run_rancher_full() {
-    print_header "Full Rancher Workflow"
-    
-    create_directories
-    set_do_token
-    terraform_init
-    terraform_validate
-    
-    read -p "Proceed with apply? (yes/no): " confirm
-    [ "$confirm" != "yes" ] && exit 0
-    
-    terraform_apply
-    terraform_output
-    
-    print_info "Waiting 60 seconds for droplets to be fully ready..."
-    sleep 60
-    
-    test_ansible
-    run_ansible_rancher
-    
-    print_header "Rancher Installation Complete!"
-    print_info "SSH to your servers and check:"
-    print_info "  - go version"
-    print_info "  - terraform version"
-    print_info "  - docker version"
-    print_info "  - kubectl version --client"
-    print_info "  - ls /root/go/src/github.com/terraform-providers/terraform-provider-rancher2"
 }
 
 # Display help
@@ -341,7 +340,6 @@ Usage: $0 [command]
 
 Commands:
   all            Full workflow (init → apply → choose installation)
-  rancher-full   Full Rancher workflow (init → apply → install Rancher prereqs)
   init           Initialize Terraform
   validate       Validate configuration
   plan           Preview changes
@@ -375,9 +373,6 @@ case "${1:-}" in
     all)
         run_all
         ;;
-    rancher-full)
-        run_rancher_full
-        ;;
     init)
         create_directories
         set_do_token
@@ -392,7 +387,6 @@ case "${1:-}" in
     apply)
         set_do_token
         terraform_apply
-        # fix_ssh_permissions
         terraform_output
         ;;
     output)
@@ -410,6 +404,9 @@ case "${1:-}" in
     rancher)
         run_ansible_rancher
         ;;
+    argocd)
+        run_ansible_argocd
+        ;;
     help|--help|-h)
         show_help
         ;;
@@ -417,13 +414,13 @@ case "${1:-}" in
         # Default:  show menu
         echo ""
         echo "Select an option:"
-        echo "  1) Full workflow (with options)"
-        echo "  2) Full Rancher workflow"
-        echo "  3) Initialize Terraform"
-        echo "  4) Plan changes"
-        echo "  5) Apply changes"
-        echo "  6) Run Ansible playbook (Install Python3, pip, Ansible)"
-        echo "  7) Run Ansible playbook (Install Rancher prerequisites)"
+        echo "  1) Run Full workflow (With installation options at the end)"
+        echo "  2) Initialize Terraform"
+        echo "  3) Plan changes"
+        echo "  4) Apply changes"
+        echo "  5) Run Ansible playbook (Install Ansible)"
+        echo "  6) Run Ansible playbook (Install Rancher)"
+        echo "  7) Run Ansible playbook (Install ArgoCD)"
         echo "  8) Test Ansible connectivity"
         echo "  9) Show outputs"
         echo "  10) Destroy all resources"
@@ -433,12 +430,12 @@ case "${1:-}" in
         
         case $choice in
             1) run_all ;;
-            2) run_rancher_full ;;
-            3) create_directories; set_do_token; terraform_init ;;
-            4) terraform_plan ;;
-            5) set_do_token; terraform_apply; terraform_output ;;
-            6) run_ansible_ansible ;;
-            7) run_ansible_rancher ;;
+            2) create_directories; set_do_token; terraform_init ;;
+            3) terraform_plan ;;
+            4) set_do_token; terraform_apply; terraform_output ;;
+            5) run_ansible_ansible ;;
+            6) run_ansible_rancher ;;
+            7) run_ansible_argocd ;;
             8) test_ansible ;;
             9) terraform_output ;;
             10) terraform_destroy ;;

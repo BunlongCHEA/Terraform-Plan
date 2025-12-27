@@ -54,23 +54,23 @@
     # ==========================================
     # System Update
     # ==========================================
-    - name: "[Debian/Ubuntu] Update apt cache"
-      apt:
-        update_cache: yes
-        cache_valid_time: 3600
-      when: ansible_os_family == supported_debian_family
+    # - name: "[Debian/Ubuntu] Update apt cache"
+    #   apt:
+    #     update_cache: yes
+    #     cache_valid_time: 3600
+    #   when: ansible_os_family == supported_debian_family
 
-    - name: "[Debian/Ubuntu] Upgrade all packages"
-      apt:
-        upgrade: dist
-        autoremove: yes
-      when: ansible_os_family == supported_debian_family
+    # - name: "[Debian/Ubuntu] Upgrade all packages"
+    #   apt:
+    #     upgrade: dist
+    #     autoremove: yes
+    #   when: ansible_os_family == supported_debian_family
 
-    - name: "[RedHat] Update all packages"
-      yum: 
-        name:  "*"
-        state: latest
-      when: ansible_os_family == supported_redhat_family
+    # - name: "[RedHat] Update all packages"
+    #   yum: 
+    #     name:  "*"
+    #     state: latest
+    #   when: ansible_os_family == supported_redhat_family
 
     # ==========================================
     # Install Base Dependencies
@@ -299,113 +299,113 @@
       until: issuer_ready.rc == 0
       ignore_errors: yes
 
-    # ==========================================
-    # Install Rancher Server
-    # ==========================================
-    - name:  Add Rancher Helm repo
-      shell: |
-        export KUBECONFIG={{ kubeconfig_path }}
-        helm repo add rancher-stable {{ rancher_helm_repository }} --force-update
-        helm repo update
-      args:
-        executable: /bin/bash
+    # # ==========================================
+    # # Install Rancher Server
+    # # ==========================================
+    # - name:  Add Rancher Helm repo
+    #   shell: |
+    #     export KUBECONFIG={{ kubeconfig_path }}
+    #     helm repo add rancher-stable {{ rancher_helm_repository }} --force-update
+    #     helm repo update
+    #   args:
+    #     executable: /bin/bash
 
-    - name: Check if Rancher is installed
-      shell: |
-        export KUBECONFIG={{ kubeconfig_path }}
-        helm list -n cattle-system | grep -w rancher
-      register: rancher_installed
-      ignore_errors: yes
-      changed_when: false
+    # - name: Check if Rancher is installed
+    #   shell: |
+    #     export KUBECONFIG={{ kubeconfig_path }}
+    #     helm list -n cattle-system | grep -w rancher
+    #   register: rancher_installed
+    #   ignore_errors: yes
+    #   changed_when: false
 
-    # - name: Install Rancher Server
+    # # - name: Install Rancher Server
+    # #   shell: |
+    # #     export KUBECONFIG={{ kubeconfig_path }}
+    # #     helm upgrade --install rancher rancher-stable/rancher \
+    # #       --namespace cattle-system \
+    # #       --create-namespace \
+    # #       --version {{ rancher_version }} \
+    # #       --set hostname={{ rancher_server_dns }} \
+    # #       --set replicas=1 \
+    # #       --set bootstrapPassword={{ rancher_bootstrap_password }} \
+    # #       --set ingress.tls.source=rancher \
+    # #       --wait --timeout 15m
+    # #   args:
+    # #     executable: /bin/bash
+    # #   when: rancher_installed.rc != 0
+    # #   register: rancher_install_result
+
+    # - name: Install Rancher Server with Let's Encrypt
     #   shell: |
     #     export KUBECONFIG={{ kubeconfig_path }}
     #     helm upgrade --install rancher rancher-stable/rancher \
     #       --namespace cattle-system \
     #       --create-namespace \
     #       --version {{ rancher_version }} \
-    #       --set hostname={{ rancher_server_dns }} \
+    #       --set hostname={{ rancher_domain }} \
     #       --set replicas=1 \
     #       --set bootstrapPassword={{ rancher_bootstrap_password }} \
-    #       --set ingress.tls.source=rancher \
+    #       --set ingress.tls.source=secret \
+    #       --set ingress.extraAnnotations."cert-manager\.io/cluster-issuer"=letsencrypt-prod \
+    #       --set privateCA=false \
     #       --wait --timeout 15m
     #   args:
     #     executable: /bin/bash
     #   when: rancher_installed.rc != 0
     #   register: rancher_install_result
 
-    - name: Install Rancher Server with Let's Encrypt
-      shell: |
-        export KUBECONFIG={{ kubeconfig_path }}
-        helm upgrade --install rancher rancher-stable/rancher \
-          --namespace cattle-system \
-          --create-namespace \
-          --version {{ rancher_version }} \
-          --set hostname={{ rancher_domain }} \
-          --set replicas=1 \
-          --set bootstrapPassword={{ rancher_bootstrap_password }} \
-          --set ingress.tls.source=secret \
-          --set ingress.extraAnnotations."cert-manager\.io/cluster-issuer"=letsencrypt-prod \
-          --set privateCA=false \
-          --wait --timeout 15m
-      args:
-        executable: /bin/bash
-      when: rancher_installed.rc != 0
-      register: rancher_install_result
+    # - name: Wait for Rancher deployment to be ready
+    #   shell: |
+    #     export KUBECONFIG={{ kubeconfig_path }}
+    #     kubectl -n cattle-system rollout status deploy/rancher --timeout=5s
+    #   args:
+    #     executable: /bin/bash
+    #   retries: 10
+    #   delay: 5
+    #   register: rancher_ready
+    #   until: rancher_ready.rc == 0
+    #   ignore_errors: yes
 
-    - name: Wait for Rancher deployment to be ready
-      shell: |
-        export KUBECONFIG={{ kubeconfig_path }}
-        kubectl -n cattle-system rollout status deploy/rancher --timeout=600s
-      args:
-        executable: /bin/bash
-      retries: 10
-      delay: 60
-      register: rancher_ready
-      until: rancher_ready.rc == 0
-      ignore_errors: yes
+    # # ==========================================
+    # # Verify Certificate
+    # # ==========================================
+    # - name: Wait for certificate to be issued
+    #   shell: |
+    #     export KUBECONFIG={{ kubeconfig_path }}
+    #     kubectl get certificate -n cattle-system
+    #   args:
+    #     executable: /bin/bash
+    #   register: cert_status
+    #   retries: 10
+    #   delay: 5
+    #   until: "'True' in cert_status.stdout"
+    #   ignore_errors: yes
 
-    # ==========================================
-    # Verify Certificate
-    # ==========================================
-    - name: Wait for certificate to be issued
-      shell: |
-        export KUBECONFIG={{ kubeconfig_path }}
-        kubectl get certificate -n cattle-system
-      args:
-        executable: /bin/bash
-      register: cert_status
-      retries: 30
-      delay: 20
-      until: "'True' in cert_status.stdout"
-      ignore_errors: yes
+    # - name: Check certificate status
+    #   shell: |
+    #     export KUBECONFIG={{ kubeconfig_path }}
+    #     kubectl describe certificate -n cattle-system
+    #   args:
+    #     executable: /bin/bash
+    #   register: cert_details
+    #   changed_when: false
+    #   ignore_errors: yes
 
-    - name: Check certificate status
-      shell: |
-        export KUBECONFIG={{ kubeconfig_path }}
-        kubectl describe certificate -n cattle-system
-      args:
-        executable: /bin/bash
-      register: cert_details
-      changed_when: false
-      ignore_errors: yes
-
-    # ==========================================
-    # Wait for Rancher to be fully operational
-    # ==========================================
-    - name: Wait for Rancher URL to be accessible
-      uri:
-        # url:  "https://{{ rancher_server_dns }}/ping"
-        # url: "https://{{ rancher_domain }}/ping"
-        url:  "https://{{ ansible_host }}/ping"
-        validate_certs: no
-        status_code: 200
-      register: rancher_ping
-      retries: 5
-      delay:  10
-      until: rancher_ping.status == 200
-      ignore_errors: yes
+    # # ==========================================
+    # # Wait for Rancher to be fully operational
+    # # ==========================================
+    # - name: Wait for Rancher URL to be accessible
+    #   uri:
+    #     # url:  "https://{{ rancher_server_dns }}/ping"
+    #     # url: "https://{{ rancher_domain }}/ping"
+    #     url:  "https://{{ ansible_host }}/ping"
+    #     validate_certs: no
+    #     status_code: 200
+    #   register: rancher_ping
+    #   retries: 3
+    #   delay:  5
+    #   until: rancher_ping.status == 200
+    #   ignore_errors: yes
 
     # ==========================================
     # Cleanup sensitive files
@@ -442,29 +442,29 @@
       register: k8s_nodes
       changed_when: false
 
-    - name: Get Rancher pods
-      shell: |
-        export KUBECONFIG={{ kubeconfig_path }}
-        kubectl get pods -n cattle-system
-      register: rancher_pods
-      changed_when: false
-      ignore_errors: yes
+    # - name: Get Rancher pods
+    #   shell: |
+    #     export KUBECONFIG={{ kubeconfig_path }}
+    #     kubectl get pods -n cattle-system
+    #   register: rancher_pods
+    #   changed_when: false
+    #   ignore_errors: yes
 
-    - name: Get certificate status
-      shell: |
-        export KUBECONFIG={{ kubeconfig_path }}
-        kubectl get certificate -n cattle-system -o wide
-      register: cert_status_final
-      changed_when: false
-      ignore_errors: yes
+    # - name: Get certificate status
+    #   shell: |
+    #     export KUBECONFIG={{ kubeconfig_path }}
+    #     kubectl get certificate -n cattle-system -o wide
+    #   register: cert_status_final
+    #   changed_when: false
+    #   ignore_errors: yes
 
-    - name: Get ingress status
-      shell: |
-        export KUBECONFIG={{ kubeconfig_path }}
-        kubectl get ingress -n cattle-system -o wide
-      register: ingress_status
-      changed_when:  false
-      ignore_errors: yes
+    # - name: Get ingress status
+    #   shell: |
+    #     export KUBECONFIG={{ kubeconfig_path }}
+    #     kubectl get ingress -n cattle-system -o wide
+    #   register: ingress_status
+    #   changed_when:  false
+    #   ignore_errors: yes
 
     # ==========================================
     # Display Installation Summary

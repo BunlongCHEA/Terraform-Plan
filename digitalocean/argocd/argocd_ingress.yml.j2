@@ -1,0 +1,35 @@
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: argocd-server-ingress
+  namespace: argocd
+  annotations:
+    # Traefik ingress controller
+    kubernetes.io/ingress.class: "traefik"
+
+    # Let's Encrypt certificate issuer
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+
+    # Traefik annotations
+    traefik.ingress.kubernetes.io/router.entrypoints: web,websecure
+    traefik.ingress.kubernetes.io/router.tls: "true"
+    
+    # Redirect HTTP to HTTPS
+    # traefik.ingress.kubernetes.io/router.middlewares: default-redirect-https@kubernetescrd
+spec:
+  tls:
+  - hosts:
+    - "{{ argocd_domain }}"
+    secretName: tls-argocd-ingress  # cert-manager will create this secret
+  rules:
+  - host: "{{ argocd_domain }}"
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: argocd-server
+            port:
+              number: 80

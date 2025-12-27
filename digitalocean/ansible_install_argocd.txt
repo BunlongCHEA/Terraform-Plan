@@ -1,0 +1,665 @@
+---
+- name: Deploy ArgoCD with Resource Patches on Remote k3s
+  hosts: os_servers
+  become: yes
+  gather_facts: yes
+  vars:
+    argocd_namespace: argocd
+    kubeconfig_path: /etc/rancher/k3s/k3s.yaml
+    patches_dir: /opt/argocd-patches
+
+     # K3s Version (from rancher/quickstart)
+    k3s_version: "v1.33.6+k3s1"
+
+    # argocd_file_ingress: "argocd_ingress.yml"
+    # ArgoCD config directory
+    argocd_config_dir:  "./argocd"
+
+    certmanager_namespace: cert-manager
+    certmanager_version: "v1.19.2"
+    cert_templates_dir: "./certificate"
+
+    # Master node (first host in inventory)
+    first_master: "{{ groups['os_servers'][0] }}"
+    first_master_ip:  "{{ hostvars[groups['os_servers'][0]]['ansible_host'] }}"
+
+    # Check if single node or multi-node
+    is_single_node:  "{{ groups['os_servers'] | length == 1 }}"
+
+    # Generate random Redis password (or use fixed one for consistency)
+    argocd_redis_password: "{{ lookup('password', '/dev/null length=32 chars=ascii_letters,digits') }}"
+    
+  tasks:
+    # ==========================================
+    # Pre-flight Checks (All Nodes)
+    # ==========================================
+    # - name: Check if k3s is installed
+    #   command: which k3s
+    #   register: k3s_check
+    #   failed_when: false
+    #   changed_when:  false
+
+    # - name:  Fail if k3s is not installed
+    #   fail:
+    #     msg:  "k3s is not installed on the remote host"
+    #   when:  k3s_check.rc != 0
+
+    # ==========================================
+    # Install K3s
+    # ==========================================
+    - name: Check if K3s is installed
+      command: k3s --version
+      register: k3s_check
+      ignore_errors: yes
+      changed_when: false
+
+    - name: Install K3s
+      shell: |
+        curl -sfL https://get.k3s.io | \
+        INSTALL_K3S_VERSION="{{ k3s_version }}" \
+        INSTALL_K3S_EXEC="server \
+          --node-external-ip {{ ansible_host }} \
+          --node-ip {{ ansible_default_ipv4.address | default(ansible_host) }} \
+          --write-kubeconfig-mode 644" \
+        sh -
+      args:
+        executable: /bin/bash
+        creates: /usr/local/bin/k3s
+      when: k3s_check.rc != 0
+
+    - name: Wait for K3s to be ready
+      wait_for:
+        path: "{{ kubeconfig_path }}"
+        state: present
+        timeout: 120
+
+    - name: Wait for K3s node to be ready
+      shell: |
+        export KUBECONFIG={{ kubeconfig_path }}
+        kubectl wait --for=condition=Ready nodes --all --timeout=300s
+      args:
+        executable: /bin/bash
+      retries: 10
+      delay: 15
+      register: k3s_ready
+      until: k3s_ready.rc == 0
+
+    # ==========================================
+    # Configure kubectl
+    # ==========================================
+    - name: Create .kube directory
+      file:
+        path: /root/.kube
+        state: directory
+        mode: "0755"
+
+    - name:  Copy kubeconfig to .kube/config
+      copy:
+        src: "{{ kubeconfig_path }}"
+        dest: /root/.kube/config
+        remote_src: yes
+        mode:  "0600"
+
+    - name: Update kubeconfig server address
+      replace:
+        path: /root/.kube/config
+        regexp:  '127.0.0.1'
+        replace: "{{ ansible_host }}"
+
+    - name: Add KUBECONFIG to bashrc
+      lineinfile:
+        path: /root/.bashrc
+        line: 'export KUBECONFIG=/root/.kube/config'
+        create: yes
+
+    # ==========================================
+    # Setup Directories (Master Only)
+    # ==========================================
+    - name: "[MASTER] Create patches directory on remote"
+      file:
+        path: "{{ patches_dir }}"
+        state: directory
+        mode: '0755'
+      when: inventory_hostname == first_master or is_single_node
+
+    - name:  "[MASTER] Create certificate manifests directory"
+      file:
+        path: /tmp/cert-manifests
+        state: directory
+        mode: "0755"
+      when: inventory_hostname == first_master or is_single_node
+
+    # ==========================================
+    # Install cert-manager (Master Only)
+    # ==========================================
+    - name: "[MASTER] Check if cert-manager namespace exists"
+      command: kubectl get namespace {{ certmanager_namespace }}
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: certmanager_ns_check
+      failed_when: false
+      changed_when: false
+      when: inventory_hostname == first_master or is_single_node
+
+    - name: "[MASTER] Create cert-manager namespace"
+      command: kubectl create namespace {{ certmanager_namespace }}
+      environment: 
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      when:  
+        - inventory_hostname == first_master or is_single_node
+        - certmanager_ns_check.rc != 0
+
+    - name: "[MASTER] Install cert-manager CRDs and components"
+      command:  >
+        kubectl apply -f
+        https://github.com/cert-manager/cert-manager/releases/download/{{ certmanager_version }}/cert-manager.yaml
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: certmanager_install
+      changed_when: "'created' in certmanager_install.stdout or 'configured' in certmanager_install.stdout"
+      when: inventory_hostname == first_master or is_single_node
+
+    - name: "[MASTER] Wait for cert-manager webhook to be ready"
+      command: >
+        kubectl wait --for=condition=ready pod 
+        -l app.kubernetes.io/component=webhook 
+        -n {{ certmanager_namespace }} 
+        --timeout=300s
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: certmanager_ready
+      changed_when: false
+      retries: 5
+      delay: 10
+      until: certmanager_ready.rc == 0
+      when: inventory_hostname == first_master or is_single_node
+
+    - name: "[MASTER] Wait additional time for webhook to initialize"
+      pause:
+        seconds: 30
+      when: inventory_hostname == first_master or is_single_node
+
+    # ==========================================
+    # Configure Let's Encrypt HTTP-01 (Master Only)
+    # ==========================================
+    - name: "[MASTER] Copy ClusterIssuer with variables to remote"
+      template: 
+        src: "{{ cert_templates_dir }}/clusterissuer-letsencrypt.yml.j2"
+        dest: /tmp/cert-manifests/clusterissuer-letsencrypt.yml
+        mode: "0644"
+      when: inventory_hostname == first_master or is_single_node
+
+    - name:  "[MASTER] Apply Let's Encrypt ClusterIssuer"
+      command: kubectl apply -f /tmp/cert-manifests/clusterissuer-letsencrypt.yml
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: cluster_issuer_apply
+      changed_when: "'created' in cluster_issuer_apply.stdout or 'configured' in cluster_issuer_apply.stdout"
+      when: inventory_hostname == first_master or is_single_node
+
+    - name: "[MASTER] Wait for ClusterIssuer to be ready"
+      command: kubectl wait --for=condition=Ready clusterissuer/letsencrypt-prod --timeout=120s
+      environment: 
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      retries: 5
+      delay: 10
+      register: issuer_ready
+      until: issuer_ready.rc == 0
+      when: inventory_hostname == first_master or is_single_node
+      ignore_errors: yes
+
+    - name: "[MASTER] Verify ClusterIssuers are ready"
+      command:  kubectl get clusterissuer
+      environment:
+        KUBECONFIG:  "{{ kubeconfig_path }}"
+      register: issuers_status
+      changed_when: false
+      when: inventory_hostname == first_master or is_single_node
+
+    - name: "[MASTER] Display ClusterIssuers status"
+      debug:
+        var: issuers_status.stdout_lines
+      when:  inventory_hostname == first_master or is_single_node
+
+    # ==========================================
+    # Install ArgoCD (Master Only)
+    # ==========================================
+    - name: "[MASTER] Check if ArgoCD namespace exists"
+      command: kubectl get namespace {{ argocd_namespace }}
+      environment:
+        KUBECONFIG:  "{{ kubeconfig_path }}"
+      register: argocd_ns_check
+      failed_when: false
+      changed_when: false
+      when: inventory_hostname == first_master
+
+    - name: "[MASTER] Create ArgoCD namespace"
+      command:  kubectl create namespace {{ argocd_namespace }}
+      environment: 
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      when: 
+        - inventory_hostname == first_master
+        - argocd_ns_check.rc != 0
+
+    - name: "[MASTER] Install ArgoCD"
+      command: >
+        kubectl apply -n {{ argocd_namespace }} -f 
+        https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
+      environment: 
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: argocd_install
+      changed_when:  "'created' in argocd_install.stdout or 'configured' in argocd_install.stdout"
+      when: inventory_hostname == first_master
+
+    - name: "[MASTER] Wait for ArgoCD deployments to be created"
+      command:  kubectl get deployment argocd-server -n {{ argocd_namespace }}
+      environment: 
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: deployment_check
+      until: deployment_check.rc == 0
+      retries: 10
+      delay: 10
+      changed_when: false
+      when: inventory_hostname == first_master
+
+    # ==========================================
+    # Create argocd-redis Secret
+    # This is required before any pods try to access Redis
+    # ==========================================
+    - name: "[MASTER] Create argocd-redis secret (required for Redis pods)"
+      shell: |
+        export KUBECONFIG={{ kubeconfig_path }}
+        
+        if kubectl get secret argocd-redis -n {{ argocd_namespace }} &>/dev/null; then
+          echo "argocd-redis secret already exists"
+          exit 0
+        fi
+        
+        # Generate random Redis password
+        REDIS_PASSWORD=$(openssl rand -base64 32)
+        kubectl create secret generic argocd-redis \
+          -n {{ argocd_namespace }} \
+          --from-literal=auth="$REDIS_PASSWORD" \
+          --dry-run=client -o yaml | kubectl apply -f -
+        
+        echo "argocd-redis secret created"
+      args:
+        executable: /bin/bash
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: redis_secret_create
+      when: inventory_hostname == first_master
+
+    - name: "[MASTER] Verify argocd-redis secret exists"
+      command: kubectl get secret argocd-redis -n {{ argocd_namespace }}
+      environment:
+        KUBECONFIG:  "{{ kubeconfig_path }}"
+      register: redis_secret_verify
+      retries: 5
+      delay: 5
+      until: redis_secret_verify.rc == 0
+      when: inventory_hostname == first_master
+
+    # ==========================================
+    # Wait for bootstrap Job to run and secret to populate
+    # ==========================================
+    - name: "[MASTER] Wait for ArgoCD install jobs to complete"
+      shell: |
+        export KUBECONFIG={{ kubeconfig_path }}
+        # Wait for jobs (install, secret creation, etc.)
+        kubectl wait --for=condition=complete job --all -n {{ argocd_namespace }} --timeout=300s 2>/dev/null || true
+        echo "Jobs completed or timed out"
+      args:
+        executable: /bin/bash
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: false
+      when:  inventory_hostname == first_master
+
+    - name: "[MASTER] Check if argocd-secret has data"
+      shell: |
+        export KUBECONFIG={{ kubeconfig_path }}
+        kubectl get secret argocd-secret -n {{ argocd_namespace }} -o jsonpath="{.data}" 2>/dev/null | grep -q "admin" && echo "has_data" || echo "empty"
+      args:
+        executable: /bin/bash
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: secret_data_check
+      changed_when: false
+      when: inventory_hostname == first_master
+
+    - name: "[MASTER] Display secret status"
+      debug:
+        msg: "argocd-secret data status: {{ secret_data_check. stdout }}"
+      when: inventory_hostname == first_master
+
+    # ==========================================
+    # Verify secret is now populated
+    # ==========================================
+    - name: "[MASTER] Verify argocd-secret now has data"
+      command: kubectl get secret argocd-secret -n {{ argocd_namespace }} -o jsonpath="{.data. admin\.password}"
+      environment:
+        KUBECONFIG:  "{{ kubeconfig_path }}"
+      register: final_secret_check
+      retries: 5
+      delay:  5
+      until: final_secret_check.stdout != ""
+      when: inventory_hostname == first_master
+
+    - name: "[MASTER] Display all secrets in argocd namespace"
+      command: kubectl get secrets -n {{ argocd_namespace }}
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: all_secrets
+      changed_when: false
+      when:  inventory_hostname == first_master
+
+    - name: "[MASTER] Display secrets"
+      debug:
+        var:  all_secrets.stdout_lines
+      when: inventory_hostname == first_master
+
+    # ==========================================
+    # Wait for core pods to be ready
+    # ==========================================
+    - name: "[MASTER] Wait for core ArgoCD pods to be ready"
+      shell: |
+        export KUBECONFIG={{ kubeconfig_path }}
+        kubectl wait --for=condition=ready pod \
+          -l app.kubernetes.io/instance=argocd \
+          -n {{ argocd_namespace }} \
+          --timeout=300s
+      environment:
+        KUBECONFIG:  "{{ kubeconfig_path }}"
+      register: argocd_pods_ready
+      retries: 3
+      delay: 30
+      until: argocd_pods_ready.rc == 0
+      when: inventory_hostname == first_master
+      ignore_errors: yes
+
+    - name: "[MASTER] Display ArgoCD pod status"
+      command: kubectl get pods -n {{ argocd_namespace }} -o wide
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: argocd_pods_status
+      changed_when: false
+      when: inventory_hostname == first_master
+
+    - name: "[MASTER] Display pod status output"
+      debug:
+        var: argocd_pods_status.stdout_lines
+      when: inventory_hostname == first_master
+
+    # ==========================================
+    # Apply Resource Patches
+    # ==========================================
+    - name: "[MASTER] Copy patch files to remote host"
+      copy:
+        src: "{{ item }}"
+        dest: "{{ patches_dir }}/{{ item | basename }}"
+        mode: '0644'
+      loop:
+        - argocd/argocd-server.json
+        - argocd/argocd-repo-server.json
+        - argocd/argocd-application-controller.json
+        - argocd/argocd-redis.json
+        - argocd/argocd-dex-server.json
+      when: inventory_hostname == first_master
+      ignore_errors: yes
+
+    - name: "[MASTER] Apply argocd-server resource patch"
+      command: >
+        kubectl patch deployment argocd-server
+        -n {{ argocd_namespace }}
+        --type=merge
+        --patch-file={{ patches_dir }}/argocd-server.json
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: patch_server
+      changed_when: "'patched' in patch_server.stdout or 'patched' in patch_server.stderr"
+      when: inventory_hostname == first_master
+      ignore_errors: yes
+
+    - name: "[MASTER] Apply argocd-repo-server resource patch"
+      command: >
+        kubectl patch deployment argocd-repo-server
+        -n {{ argocd_namespace }}
+        --type=merge
+        --patch-file={{ patches_dir }}/argocd-repo-server.json
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: patch_repo
+      changed_when:  "'patched' in patch_repo.stdout or 'patched' in patch_repo.stderr"
+      when: inventory_hostname == first_master
+      ignore_errors:  yes
+
+    - name: "[MASTER] Apply argocd-application-controller resource patch"
+      command: >
+        kubectl patch statefulset argocd-application-controller
+        -n {{ argocd_namespace }}
+        --type=merge
+        --patch-file={{ patches_dir }}/argocd-application-controller.json
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: patch_controller
+      changed_when: "'patched' in patch_controller.stdout or 'patched' in patch_controller.stderr"
+      when: inventory_hostname == first_master
+      ignore_errors: yes
+
+    - name: "[MASTER] Apply argocd-redis resource patch"
+      command: >
+        kubectl patch deployment argocd-redis
+        -n {{ argocd_namespace }}
+        --type=merge
+        --patch-file={{ patches_dir }}/argocd-redis.json
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: patch_redis
+      changed_when: "'patched' in patch_redis.stdout or 'patched' in patch_redis.stderr"
+      when: inventory_hostname == first_master
+      ignore_errors: yes
+
+    - name: "[MASTER] Apply argocd-dex-server resource patch"
+      command: >
+        kubectl patch deployment argocd-dex-server
+        -n {{ argocd_namespace }}
+        --type=merge
+        --patch-file={{ patches_dir }}/argocd-dex-server.json
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: patch_dex
+      changed_when: "'patched' in patch_dex.stdout or 'patched' in patch_dex.stderr"
+      when: inventory_hostname == first_master
+      ignore_errors: yes
+
+    - name: "[MASTER] Wait for pods to restart after patching"
+      pause:
+        seconds: 30
+      when: inventory_hostname == first_master
+
+    - name: "[MASTER] Wait for all ArgoCD pods to be ready after patches"
+      shell: |
+        export KUBECONFIG={{ kubeconfig_path }}
+        kubectl wait --for=condition=ready pod \
+          -l app.kubernetes.io/instance=argocd \
+          -n {{ argocd_namespace }} \
+          --timeout=300s
+      environment: 
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: pods_ready
+      changed_when: false
+      retries: 3
+      delay: 30
+      until: pods_ready.rc == 0
+      when: inventory_hostname == first_master
+      ignore_errors: yes
+
+    # ==========================================
+    # Configure ArgoCD Ingress with Let's Encrypt (Master Only)
+    # ==========================================
+    - name: "[MASTER] Configure ArgoCD to run in insecure mode (HTTP)"
+      command: >
+        kubectl patch configmap argocd-cmd-params-cm -n {{ argocd_namespace }} --type merge -p '{"data":{"server.insecure":"true"}}'
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: argocd_insecure
+      changed_when:  "'patched' in argocd_insecure.stdout"
+      when: inventory_hostname == first_master or is_single_node
+
+    - name:  "[MASTER] Restart argocd-server to apply insecure mode"
+      command:  kubectl rollout restart deployment argocd-server -n {{ argocd_namespace }}
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      when: inventory_hostname == first_master or is_single_node
+
+    - name: "[MASTER] Wait for argocd-server rollout to complete"
+      command: kubectl rollout status deployment argocd-server -n {{ argocd_namespace }} --timeout=200s
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: false
+      when: inventory_hostname == first_master or is_single_node
+
+    - name: "[MASTER] Copy ArgoCD Ingress with variables to remote"
+      template:
+        src:  "{{ argocd_config_dir }}/argocd_ingress.yml.j2"
+        dest: "{{ patches_dir }}/argocd_ingress.yml"
+        mode: '0644'
+      when:  inventory_hostname == first_master or is_single_node
+
+    - name: "[MASTER] Apply ArgoCD Ingress"
+      command: kubectl apply -f {{ patches_dir }}/argocd_ingress.yml
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: ingress_apply
+      changed_when: "'created' in ingress_apply.stdout or 'configured' in ingress_apply.stdout"
+      when: inventory_hostname == first_master or is_single_node
+
+    # ==========================================
+    # Verify Certificate (Master Only)
+    # ==========================================
+    - name: "[MASTER] Wait for Let's Encrypt certificate to be ready"
+      command: >
+        kubectl wait --for=condition=ready certificate argocd-server-tls 
+        -n {{ argocd_namespace }} 
+        --timeout=300s
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: cert_ready
+      changed_when:  false
+      retries: 3
+      delay: 30
+      until: cert_ready.rc == 0
+      ignore_errors: yes
+      when: inventory_hostname == first_master or is_single_node
+
+    - name: "[MASTER] Check certificate status"
+      command: kubectl get certificate -n {{ argocd_namespace }}
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: cert_status
+      changed_when: false
+      when: inventory_hostname == first_master or is_single_node
+
+    - name: "[MASTER] Display certificate status"
+      debug:
+        var:  cert_status.stdout_lines
+      when: inventory_hostname == first_master or is_single_node
+
+    - name: "[MASTER] Check certificate details (if not ready)"
+      command: kubectl describe certificate argocd-server-tls -n {{ argocd_namespace }}
+      environment:
+        KUBECONFIG:  "{{ kubeconfig_path }}"
+      register: cert_describe
+      changed_when: false
+      when: 
+        - inventory_hostname == first_master or is_single_node
+        - cert_ready is failed
+
+    - name: "[MASTER] Display certificate details"
+      debug: 
+        var: cert_describe.stdout_lines
+      when: 
+        - inventory_hostname == first_master or is_single_node
+        - cert_ready is failed
+
+    # ==========================================
+    # Final Output (Master Only)
+    # ==========================================
+    - name: "[MASTER] Get ArgoCD admin password"
+      shell: kubectl -n {{ argocd_namespace }} get secret argocd-initial-admin-secret -o jsonpath="{.data.password}" | base64 -d
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: argocd_password
+      changed_when: false
+      when: inventory_hostname == first_master or is_single_node
+
+    - name: "[MASTER] Get Ingress status"
+      command:  kubectl get ingress -n {{ argocd_namespace }}
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: ingress_status
+      changed_when: false
+      when: inventory_hostname == first_master or is_single_node
+
+    - name: "[MASTER] Verify resource limits are applied"
+      shell: |
+        echo "=== Resource Verification ==="
+        echo "--- argocd-server ---"
+        kubectl get deployment argocd-server -n {{ argocd_namespace }} -o jsonpath='{.spec.template.spec.containers[0].resources}' | jq .
+
+        echo "--- argocd-repo-server ---"
+        kubectl get deployment argocd-repo-server -n {{ argocd_namespace }} -o jsonpath='{.spec.template.spec.containers[0].resources}' | jq .
+
+        echo "--- argocd-application-controller ---"
+        kubectl get statefulset argocd-application-controller -n {{ argocd_namespace }} -o jsonpath='{.spec.template.spec.containers[0].resources}' | jq .
+
+        echo "--- argocd-redis ---"
+        kubectl get deployment argocd-redis -n {{ argocd_namespace }} -o jsonpath='{.spec.template.spec.containers[0].resources}' | jq .
+
+        echo "--- argocd-dex-server ---"
+        kubectl get deployment argocd-dex-server -n {{ argocd_namespace }} -o jsonpath='{.spec.template.spec.containers[0].resources}' | jq .
+      environment:
+        KUBECONFIG:  "{{ kubeconfig_path }}"
+      register: resource_verification
+      changed_when: false
+      failed_when: false
+      when: inventory_hostname == first_master or is_single_node
+
+    - name: "[MASTER] Display ArgoCD access information"
+      debug:
+        msg: 
+          - "=========================================="
+          - "ArgoCD Installation Complete!"
+          - "=========================================="
+          - "Username: admin"
+          - "Password: {{ argocd_password.stdout }}"
+          - ""
+          - "Access URL: https://{{ argocd_domain }}"
+          - ""
+          - "SSL Certificate: Let's Encrypt (HTTP-01)"
+          - "Certificate Status:"
+          - "{{ cert_status.stdout_lines | default(['Not available']) }}"
+          - ""
+          - "Ingress Status:"
+          - "{{ ingress_status.stdout_lines | default(['Not available']) }}"
+          - ""
+          - "Resource Verification:"
+          - "{{ resource_verification.stdout_lines | default(['Not available']) }}"
+          - "=========================================="
+      when: inventory_hostname == first_master or is_single_node
+
+    # ==========================================
+    # Cleanup (Master Only)
+    # ==========================================
+    - name: "[MASTER] Remove temporary certificate manifests"
+      file:
+        path:  /tmp/cert-manifests
+        state:  absent
+      when:  inventory_hostname == first_master or is_single_node
+
+    - name: "[MASTER] Cleanup temporary patches directory"
+      file:
+        path: "{{ patches_dir }}"
+        state:  absent
+      when:  inventory_hostname == first_master or is_single_node

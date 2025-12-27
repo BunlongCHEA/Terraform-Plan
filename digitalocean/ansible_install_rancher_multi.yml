@@ -29,9 +29,36 @@
     # Certificate templates directory
     cert_templates_dir:  "./certificate"
     
-    # Master node (first host in inventory)
-    master_node:  "{{ groups['os_servers'][0] }}"
-    master_ip: "{{ hostvars[groups['os_servers'][0]]['ansible_host'] }}"
+    # Multi-Master Configuration
+    # Set number of master nodes (default: 1)
+    # Example: inventory.ini
+    # [os_servers]
+    # server1 ansible_host=167.71.1.1
+    # server2 ansible_host=167.71.1.2
+    # server3 ansible_host=167.71.1.3
+    # server4 ansible_host=167.71.1.4
+    # server5 ansible_host=167.71.1.5
+    # If master_count : 3 masters out of 5 nodes = 3 masters + 2 workers
+    master_count: 1
+
+    # Master nodes list (first N nodes from inventory)
+    master_nodes:  "{{ groups['os_servers'][:master_count | int] }}"
+    
+    # Worker nodes list (remaining nodes)
+    worker_nodes: "{{ groups['os_servers'][master_count | int: ] }}"
+    
+    # Check if current host is a master
+    is_master: "{{ inventory_hostname in master_nodes }}"
+    
+    # Check if current host is a worker
+    is_worker: "{{ inventory_hostname in worker_nodes }}"
+    
+    # First master node (for initial cluster setup)
+    first_master: "{{ groups['os_servers'][0] }}"
+    first_master_ip:  "{{ hostvars[groups['os_servers'][0]]['ansible_host'] }}"
+
+    # master_node:  "{{ groups['os_servers'][0] }}"
+    # master_ip: "{{ hostvars[groups['os_servers'][0]]['ansible_host'] }}"
     
     # Rancher DNS
     rancher_server_dns: "{{ master_ip }}.nip.io"
@@ -79,7 +106,7 @@
       when: ansible_os_family == supported_redhat_family
 
     # ==========================================
-    # Install K3s Master (First Node Only)
+    # Install K3s Master
     # ==========================================
     - name: Check if K3s is installed
       command: k3s --version
@@ -87,15 +114,39 @@
       ignore_errors:  yes
       changed_when: false
 
-    - name: "[MASTER] Install K3s Server"
+    - name: "[FIRST MASTER] Install K3s Server (Initialize Cluster)"
       shell: |
         curl -sfL https://get.k3s.io | \
         INSTALL_K3S_VERSION="{{ k3s_version }}" \
         INSTALL_K3S_EXEC="server \
+          --cluster-init \
           --node-external-ip {{ ansible_host }} \
           --node-ip {{ ansible_default_ipv4.address | default(ansible_host) }} \
           --tls-san {{ ansible_host }} \
-          --tls-san {{ rancher_server_dns }} \
+          --tls-san {{ first_master_ip }} \
+          --tls-san {{ rancher_domain }} \
+          --write-kubeconfig-mode 644" \
+        sh -
+      args: 
+        executable: /bin/bash
+        creates: /usr/local/bin/k3s
+      when:  
+        - k3s_check.rc != 0
+        - inventory_hostname == first_master
+    
+    # Install K3s Additional Masters (Join Cluster)
+    - name: "[ADDITIONAL MASTER] Install K3s Server (Join Cluster)"
+      shell: |
+        curl -sfL https://get.k3s.io | \
+        INSTALL_K3S_VERSION="{{ k3s_version }}" \
+        K3S_URL="https://{{ first_master_ip }}:6443" \
+        K3S_TOKEN="{{ k3s_cluster_token }}" \
+        INSTALL_K3S_EXEC="server \
+          --node-external-ip {{ ansible_host }} \
+          --node-ip {{ ansible_default_ipv4.address | default(ansible_host) }} \
+          --tls-san {{ ansible_host }} \
+          --tls-san {{ first_master_ip }} \
+          --tls-san {{ rancher_domain }} \
           --write-kubeconfig-mode 644" \
         sh -
       args:
@@ -103,44 +154,45 @@
         creates: /usr/local/bin/k3s
       when: 
         - k3s_check.rc != 0
-        - inventory_hostname == master_node
+        - is_master
+        - inventory_hostname != first_master
 
-    - name: "[MASTER] Wait for K3s to be ready"
+    - name: "[FIRST MASTER] Wait for K3s to be ready"
       wait_for:
         path: "{{ kubeconfig_path }}"
-        state: present
-        timeout: 120
-      when: inventory_hostname == master_node
+        state:  present
+        timeout:  120
+      when: inventory_hostname == first_master
 
-    - name: "[MASTER] Wait for K3s node to be ready"
+    - name: "[FIRST MASTER] Wait for K3s node to be ready"
       shell: |
         export KUBECONFIG={{ kubeconfig_path }}
         kubectl wait --for=condition=Ready nodes --all --timeout=300s
       args: 
         executable: /bin/bash
-      retries: 10
+      retries:  10
       delay:  15
       register: k3s_ready
-      until: k3s_ready.rc == 0
-      when: inventory_hostname == master_node
+      until:  k3s_ready.rc == 0
+      when: inventory_hostname == first_master
 
-    - name: "[MASTER] Get K3s token"
+    - name: "[FIRST MASTER] Get K3s token"
       slurp:
         src: "{{ k3s_token_path }}"
       register:  k3s_token_raw
-      when: inventory_hostname == master_node
+      when: inventory_hostname == first_master
 
-    - name: "[MASTER] Set K3s token fact"
+    - name: "[FIRST MASTER] Set K3s token fact"
       set_fact: 
         k3s_token: "{{ k3s_token_raw.content | b64decode | trim }}"
-      when: inventory_hostname == master_node
+      when: inventory_hostname == first_master
 
     # ==========================================
     # Share K3s Token to All Nodes
     # ==========================================
-    - name: Share K3s token across all hosts
-      set_fact:
-        k3s_cluster_token: "{{ hostvars[master_node]['k3s_token'] }}"
+    - name:  Share K3s token across all hosts
+      set_fact: 
+        k3s_cluster_token: "{{ hostvars[first_master]['k3s_token'] }}"
 
     # ==========================================
     # Install K3s Agent (Worker Nodes Only)
@@ -149,25 +201,35 @@
       shell: |
         curl -sfL https://get.k3s.io | \
         INSTALL_K3S_VERSION="{{ k3s_version }}" \
-        K3S_URL="https://{{ master_ip }}:6443" \
+        K3S_URL="https://{{ first_master_ip }}:6443" \
         K3S_TOKEN="{{ k3s_cluster_token }}" \
         INSTALL_K3S_EXEC="agent \
           --node-external-ip {{ ansible_host }} \
           --node-ip {{ ansible_default_ipv4.address | default(ansible_host) }}" \
         sh -
-      args:
+      args: 
         executable: /bin/bash
         creates: /usr/local/bin/k3s
       when: 
         - k3s_check.rc != 0
-        - inventory_hostname != master_node
+        - is_worker
 
     - name: "[WORKER] Wait for K3s agent to start"
       systemd:
-        name: k3s-agent
+        name:  k3s-agent
         state: started
         enabled: yes
-      when: inventory_hostname != master_node
+      when: is_worker
+      ignore_errors: yes
+
+    - name: "[ADDITIONAL MASTER] Wait for K3s server to start"
+      systemd:
+        name:  k3s
+        state: started
+        enabled: yes
+      when: 
+        - is_master
+        - inventory_hostname != first_master
       ignore_errors: yes
 
     # ==========================================
@@ -178,7 +240,7 @@
         path: /root/.kube
         state: directory
         mode: "0755"
-      when: inventory_hostname == master_node
+      when: inventory_hostname == first_master
 
     - name: "[MASTER] Copy kubeconfig"
       copy:
@@ -186,21 +248,21 @@
         dest: /root/.kube/config
         remote_src: yes
         mode: "0600"
-      when: inventory_hostname == master_node
+      when: inventory_hostname == first_master
 
     - name: "[MASTER] Update kubeconfig server address"
       replace:
         path: /root/.kube/config
         regexp:  '127.0.0.1'
         replace: "{{ ansible_host }}"
-      when:  inventory_hostname == master_node
+      when:  inventory_hostname == first_master
 
     - name: "[MASTER] Add KUBECONFIG to bashrc"
       lineinfile:
         path: /root/.bashrc
         line: 'export KUBECONFIG=/root/.kube/config'
         create: yes
-      when: inventory_hostname == master_node
+      when: inventory_hostname == first_master
 
     # ==========================================
     # Install Helm (Master Only)
@@ -210,7 +272,7 @@
       register: helm_check
       ignore_errors: yes
       changed_when: false
-      when: inventory_hostname == master_node
+      when: inventory_hostname == first_master
 
     - name: "[MASTER] Download Helm install script"
       get_url: 
@@ -218,7 +280,7 @@
         dest: /tmp/get_helm.sh
         mode: "0755"
       when: 
-        - inventory_hostname == master_node
+        - inventory_hostname == first_master
         - helm_check.rc != 0
 
     - name: "[MASTER] Install Helm"
@@ -226,7 +288,7 @@
       args:
         creates: /usr/local/bin/helm
       when: 
-        - inventory_hostname == master_node
+        - inventory_hostname == first_master
         - helm_check.rc != 0
       environment:
         DESIRED_VERSION: "{{ helm_version }}"
@@ -241,7 +303,7 @@
         helm repo update
       args:
         executable: /bin/bash
-      when:  inventory_hostname == master_node
+      when:  inventory_hostname == first_master
 
     - name: "[MASTER] Check if cert-manager is installed"
       shell: |
@@ -250,7 +312,7 @@
       register: cert_manager_ns
       ignore_errors: yes
       changed_when: false
-      when: inventory_hostname == master_node
+      when: inventory_hostname == first_master
 
     - name: "[MASTER] Install cert-manager"
       shell: |
@@ -264,7 +326,7 @@
       args:
         executable: /bin/bash
       when:
-        - inventory_hostname == master_node
+        - inventory_hostname == first_master
         - cert_manager_ns.rc != 0
 
     - name: "[MASTER] Wait for cert-manager"
@@ -277,7 +339,7 @@
       delay: 30
       register: cert_manager_ready
       until: cert_manager_ready.rc == 0
-      when: inventory_hostname == master_node
+      when: inventory_hostname == first_master
 
     # ==========================================
     # Configure Let's Encrypt HTTP-01 (Master Only)
@@ -287,14 +349,14 @@
         path: /tmp/cert-manifests
         state: directory
         mode: "0755"
-      when: inventory_hostname == master_node
+      when: inventory_hostname == first_master
 
     - name:  "[MASTER] Copy ClusterIssuer with variables to remote"
       template:
         src:  "{{ cert_templates_dir }}/clusterissuer-letsencrypt.yml.j2"
         dest: /tmp/cert-manifests/clusterissuer-letsencrypt.yml
         mode: "0644"
-      when: inventory_hostname == master_node
+      when: inventory_hostname == first_master
 
     - name: "[MASTER] Apply Let's Encrypt ClusterIssuer"
       shell: |
@@ -302,7 +364,7 @@
         kubectl apply -f /tmp/cert-manifests/clusterissuer-letsencrypt.yml
       args:
         executable: /bin/bash
-      when:  inventory_hostname == master_node
+      when:  inventory_hostname == first_master
 
     - name: "[MASTER] Wait for ClusterIssuer to be ready"
       shell: |
@@ -314,7 +376,7 @@
       delay: 10
       register: issuer_ready
       until: issuer_ready.rc == 0
-      when: inventory_hostname == master_node
+      when: inventory_hostname == first_master
       ignore_errors: yes
 
     # ==========================================
@@ -327,7 +389,7 @@
         helm repo update
       args:
         executable: /bin/bash
-      when: inventory_hostname == master_node
+      when: inventory_hostname == first_master
 
     - name: "[MASTER] Check if Rancher is installed"
       shell: |
@@ -336,7 +398,7 @@
       register: rancher_installed
       ignore_errors: yes
       changed_when: false
-      when: inventory_hostname == master_node
+      when: inventory_hostname == first_master
 
     # - name: "[MASTER] Install Rancher Server"
     #   shell: |
@@ -353,7 +415,7 @@
     #   args:
     #     executable: /bin/bash
     #   when:
-    #     - inventory_hostname == master_node
+    #     - inventory_hostname == first_master
     #     - rancher_installed.rc != 0
 
     - name: "[MASTER] Install Rancher Server with Let's Encrypt"
@@ -373,7 +435,7 @@
       args:
         executable: /bin/bash
       when:
-        - inventory_hostname == master_node
+        - inventory_hostname == first_master
         - rancher_installed.rc != 0
 
     - name: "[MASTER] Wait for Rancher to be ready"
@@ -386,7 +448,7 @@
       delay: 60
       register: rancher_ready
       until: rancher_ready.rc == 0
-      when: inventory_hostname == master_node
+      when: inventory_hostname == first_master
       ignore_errors: yes
 
     # ==========================================
@@ -402,7 +464,7 @@
       retries: 5
       delay: 10
       until: all_nodes.rc == 0
-      when: inventory_hostname == master_node
+      when: inventory_hostname == first_master
 
     # ==========================================
     # Verification (Master Only)
@@ -415,7 +477,7 @@
         executable: /bin/bash
       register: cert_status
       changed_when: false
-      when:  inventory_hostname == master_node
+      when:  inventory_hostname == first_master
       ignore_errors: yes
 
     - name: "[MASTER] Get ingress status"
@@ -426,7 +488,7 @@
         executable: /bin/bash
       register: ingress_status
       changed_when: false
-      when: inventory_hostname == master_node
+      when: inventory_hostname == first_master
       ignore_errors: yes
       
     - name: "[MASTER] Get cluster nodes"
@@ -435,7 +497,7 @@
         kubectl get nodes -o wide
       register: k8s_nodes
       changed_when: false
-      when:  inventory_hostname == master_node
+      when:  inventory_hostname == first_master
 
     - name: "[MASTER] Get Rancher pods"
       shell: |
@@ -443,7 +505,7 @@
         kubectl get pods -n cattle-system
       register: rancher_pods
       changed_when: false
-      when: inventory_hostname == master_node
+      when: inventory_hostname == first_master
       ignore_errors: yes
 
     # ==========================================
@@ -453,7 +515,7 @@
       file:
         path: /tmp/cert-manifests
         state: absent
-      when: inventory_hostname == master_node
+      when: inventory_hostname == first_master
 
     # ==========================================
     # Display Summary (Master Only)
@@ -483,11 +545,14 @@
           - ""
           - "  URL: https://{{ rancher_domain  }}"
           - "  (Secured with Let's Encrypt SSL)"
-          - "  # Insecure URL: https://{{ master_ip }}"
+          - "  # Insecure URL: https://{{ first_master_ip }}"
+          - ""
+          - "  Master Nodes:  {{ master_nodes | join(', ') }}"
+          - "  Worker Nodes:  {{ worker_nodes | join(', ') if worker_nodes | length > 0 else 'None' }}"
           - "  Bootstrap Password: {{ rancher_bootstrap_password }}"
           - ""
           - "==========================================================="
-      when: inventory_hostname == master_node
+      when: inventory_hostname == first_master
 
     # - name: "[MASTER] Save access information"
     #   copy:
@@ -500,7 +565,9 @@
           RANCHER CLUSTER INFORMATION
           ===========================================================
           
-          Master Node: {{ master_ip }}
+          Master Nodes ({{ master_count }}): {{ master_nodes | join(', ') }}
+          Worker Nodes ({{ worker_nodes | length }}): {{ worker_nodes | join(', ') if worker_nodes | length > 0 else 'None' }}
+          First Master IP: {{ first_master_ip }}
           Rancher URL: https://{{ rancher_domain }}
           (Secured with Let's Encrypt SSL - HTTP-01 Challenge)
           # Insecure URL: https://{{ rancher_server_dns }}
@@ -542,7 +609,7 @@
           
           ===========================================================
         mode: "0600"
-      when: inventory_hostname == master_node
+      when: inventory_hostname == first_master
 
     - name: "[MASTER] Save access information to remote server"
       copy:

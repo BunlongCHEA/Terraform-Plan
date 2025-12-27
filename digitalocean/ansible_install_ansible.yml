@@ -13,17 +13,17 @@
     # ==========================================
     # Ubuntu / Debian Installation
     # ==========================================
-    - name: "[Debian/Ubuntu] Update apt cache"
-      apt:
-        update_cache: yes
-        cache_valid_time: 3600
-      when: ansible_os_family == supported_debian_family
+    # - name: "[Debian/Ubuntu] Update apt cache"
+    #   apt:
+    #     update_cache: yes
+    #     cache_valid_time: 3600
+    #   when: ansible_os_family == supported_debian_family
 
-    - name: "[Debian/Ubuntu] Upgrade all packages"
-      apt:
-        upgrade: dist
-        autoremove: yes
-      when: ansible_os_family == supported_debian_family
+    # - name: "[Debian/Ubuntu] Upgrade all packages"
+    #   apt:
+    #     upgrade: dist
+    #     autoremove: yes
+    #   when: ansible_os_family == supported_debian_family
 
     - name: "[Debian/Ubuntu] Install Python3 and dependencies"
       apt:
