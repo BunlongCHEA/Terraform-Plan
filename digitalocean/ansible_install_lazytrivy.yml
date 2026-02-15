@@ -1,0 +1,403 @@
+---
+# ===========================================
+# Ansible Playbook:  Install LazyTrivy
+# Security Scanner UI for DevSecOps
+# Source: https://github.com/owenrumney/lazytrivy
+# ===========================================
+
+- name: Install LazyTrivy Security Scanner
+  hosts:  all
+  become: yes
+  gather_facts: yes
+  
+  vars:
+    # LazyTrivy version
+    lazytrivy_version: "1.2.9"
+    
+    # Trivy version (underlying scanner)
+    trivy_version: "0.68.2"
+    
+    # Installation paths
+    lazytrivy_install_path: "/usr/local/bin/lazytrivy"
+    trivy_install_path: "/usr/local/bin/trivy"
+    
+    # Config directory
+    lazytrivy_config_dir: "/home/{{ ansible_user }}/.config/lazytrivy"
+    lazytrivy_cache_dir: "/home/{{ ansible_user }}/.cache/lazytrivy"
+    
+    # OS Family detection
+    supported_debian_family: "Debian"
+    supported_redhat_family: "RedHat"
+
+  tasks:
+    # # ==========================================
+    # # STEP 1: Install Dependencies
+    # # ==========================================
+    # - name: "[Step 1] Install base dependencies (Debian/Ubuntu)"
+    #   apt:
+    #     name: 
+    #       - curl
+    #       - wget
+    #       - ca-certificates
+    #       - gnupg
+    #       - lsb-release
+    #     state:  present
+    #     update_cache: yes
+    #   when: ansible_os_family == supported_debian_family
+
+    # - name: "[Step 1] Install base dependencies (RedHat)"
+    #   yum: 
+    #     name: 
+    #       - curl
+    #       - wget
+    #       - ca-certificates
+    #     state: present
+    #   when: ansible_os_family == supported_redhat_family
+
+    # # ==========================================
+    # # STEP 2: Install Docker (Required for Image Scanning)
+    # # ==========================================
+    # - name: "[Step 2] Check if Docker is installed"
+    #   command: docker --version
+    #   register: docker_check
+    #   ignore_errors: yes
+    #   changed_when:  false
+
+    # - name: "[Step 2] Install Docker (Debian/Ubuntu)"
+    #   block:
+    #     - name: Add Docker GPG key
+    #       apt_key:
+    #         url: https://download.docker.com/linux/ubuntu/gpg
+    #         state:  present
+
+    #     - name: Add Docker repository
+    #       apt_repository:
+    #         repo: "deb [arch=amd64] https://download.docker.com/linux/ubuntu {{ ansible_distribution_release }} stable"
+    #         state: present
+
+    #     - name: Install Docker
+    #       apt:
+    #         name:
+    #           - docker-ce
+    #           - docker-ce-cli
+    #           - containerd.io
+    #         state: present
+    #         update_cache: yes
+    #   when: 
+    #     - docker_check.rc != 0
+    #     - ansible_os_family == supported_debian_family
+
+    # - name: "[Step 2] Start and enable Docker"
+    #   service:
+    #     name:  docker
+    #     state:  started
+    #     enabled:  yes
+    #   when: docker_check.rc != 0
+
+    # - name: "[Step 2] Add user to docker group"
+    #   user:
+    #     name:  "{{ ansible_user }}"
+    #     groups:  docker
+    #     append:  yes
+
+    # ==========================================
+    # STEP 3: Install Trivy (Required Scanner)
+    # ==========================================
+    - name: "[Step 3] Check if Trivy is installed"
+      command: trivy --version
+      register: trivy_check
+      ignore_errors: yes
+      changed_when: false
+
+    - name: "[Step 3] Install Trivy (Debian/Ubuntu)"
+      block:
+        - name: Add Trivy GPG key
+          shell: |
+            wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key | gpg --dearmor -o /usr/share/keyrings/trivy.gpg
+          args:
+            creates:  /usr/share/keyrings/trivy.gpg
+
+        - name: Add Trivy repository
+          copy:
+            dest:  /etc/apt/sources.list.d/trivy.list
+            content: |
+              deb [signed-by=/usr/share/keyrings/trivy.gpg] https://aquasecurity.github.io/trivy-repo/deb generic main
+            mode: '0644'
+
+        - name: Install Trivy
+          apt:
+            name:  trivy
+            state: present
+            update_cache: yes
+      when: 
+        - trivy_check.rc != 0
+        - ansible_os_family == supported_debian_family
+
+    - name:  "[Step 3] Install Trivy (RedHat)"
+      block:
+        - name: Add Trivy repository
+          yum_repository: 
+            name: trivy
+            description:  Trivy repository
+            baseurl: https://aquasecurity.github.io/trivy-repo/rpm/releases/$basearch/
+            gpgcheck: no
+            enabled: yes
+
+        - name: Install Trivy
+          yum:
+            name: trivy
+            state: present
+      when: 
+        - trivy_check.rc != 0
+        - ansible_os_family == supported_redhat_family
+
+    - name: "[Step 3] Verify Trivy installation"
+      command:  trivy --version
+      register: trivy_version_result
+      changed_when: false
+
+    - name: "[Step 3] Display Trivy version"
+      debug: 
+        msg: "Trivy installed:  {{ trivy_version_result.stdout }}"
+
+    # ==========================================
+    # STEP 4: Install LazyTrivy
+    # ==========================================
+    - name: "[Step 4] Check if LazyTrivy is installed"
+      command: lazytrivy --help
+      register: lazytrivy_check
+      ignore_errors: yes
+      changed_when: false
+
+    - name: "[Step 4] Determine system architecture"
+      set_fact:
+        lazytrivy_arch: "{{ 'arm64' if ansible_architecture == 'aarch64' else 'amd64' }}"
+
+    - name: "[Step 4] Download LazyTrivy binary"
+      get_url:
+        url: "https://github.com/owenrumney/lazytrivy/releases/download/v{{ lazytrivy_version }}/lazytrivy-linux-{{ lazytrivy_arch }}"
+        dest: "{{ lazytrivy_install_path }}"
+        mode:  '0755'
+      when: lazytrivy_check.rc != 0
+
+    - name: "[Step 4] Verify LazyTrivy installation"
+      command: lazytrivy --help
+      register: lazytrivy_verify
+      changed_when: false
+
+    # ==========================================
+    # STEP 5: Configure LazyTrivy
+    # ==========================================
+    - name:  "[Step 5] Create LazyTrivy config directory"
+      file:
+        path:  "{{ lazytrivy_config_dir }}"
+        state: directory
+        mode: '0755'
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+
+    - name: "[Step 5] Create LazyTrivy cache directory"
+      file:
+        path:  "{{ lazytrivy_cache_dir }}"
+        state: directory
+        mode: '0755'
+        owner: "{{ ansible_user }}"
+        group:  "{{ ansible_user }}"
+
+    - name: "[Step 5] Create LazyTrivy configuration file"
+      copy:
+        dest:  "{{ lazytrivy_config_dir }}/config.yml"
+        content:  |
+          # LazyTrivy Configuration
+          # ======================
+          
+          # Vulnerability scanning options
+          vulnerability: 
+            # Ignore vulnerabilities without fixes
+            ignoreunfixed: false
+          
+          # Filesystem scanning options
+          filesystem:
+            # Scan for exposed secrets
+            scansecrets: true
+            # Scan for misconfigurations (IaC)
+            scanmisconfiguration: true
+            # Scan for vulnerabilities
+            scanvulnerabilities: true
+          
+          # Cache directory for Trivy DB
+          cachedirectory: {{ lazytrivy_cache_dir }}
+          
+          # Logging options
+          debug: true
+          trace: false
+        mode: '0644'
+        owner:  "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+
+    # ==========================================
+    # STEP 6: Initialize Trivy Database
+    # ==========================================
+    - name: "[Step 6] Download Trivy vulnerability database (first run)"
+      command: trivy image --download-db-only
+      become_user: "{{ ansible_user }}"
+      register: trivy_db_download
+      changed_when: "'Downloading' in trivy_db_download.stderr"
+      ignore_errors: yes
+
+    # ==========================================
+    # STEP 7: Create Helper Scripts
+    # ==========================================
+    - name: "[Step 7] Create scan helper scripts directory"
+      file:
+        path: /opt/lazytrivy-scripts
+        state: directory
+        mode: '0755'
+
+    - name: "[Step 7] Create image scan script"
+      copy: 
+        dest: /opt/lazytrivy-scripts/scan-image.sh
+        content: |
+          #!/bin/bash
+          # Scan Docker image with LazyTrivy
+          # Usage: ./scan-image.sh [image_name]
+          
+          if [ -z "$1" ]; then
+            echo "Starting LazyTrivy in image scanning mode..."
+            lazytrivy image
+          else
+            echo "Scanning image:  $1"
+            trivy image "$1"
+          fi
+        mode: '0755'
+
+    - name: "[Step 7] Create filesystem scan script"
+      copy:
+        dest: /opt/lazytrivy-scripts/scan-filesystem.sh
+        content: |
+          #!/bin/bash
+          # Scan filesystem/IaC with LazyTrivy
+          # Usage: ./scan-filesystem.sh [path]
+          
+          SCAN_PATH="${1: -.}"
+          
+          echo "Starting LazyTrivy filesystem scan on:  $SCAN_PATH"
+          lazytrivy filesystem --path "$SCAN_PATH"
+        mode:  '0755'
+
+    - name: "[Step 7] Create Kubernetes scan script"
+      copy:
+        dest: /opt/lazytrivy-scripts/scan-k8s.sh
+        content: |
+          #!/bin/bash
+          # Scan Kubernetes cluster with LazyTrivy
+          # Usage:  ./scan-k8s.sh [context]
+          
+          if [ -z "$1" ]; then
+            echo "Starting LazyTrivy in Kubernetes scanning mode..."
+            lazytrivy k8s
+          else
+            echo "Scanning Kubernetes context: $1"
+            lazytrivy k8s --context "$1"
+          fi
+        mode:  '0755'
+
+    - name: "[Step 7] Create IaC scan script (Terraform/Ansible)"
+      copy:
+        dest: /opt/lazytrivy-scripts/scan-iac.sh
+        content: |
+          #!/bin/bash
+          # Scan Infrastructure as Code files
+          # Usage: ./scan-iac.sh [path]
+          
+          SCAN_PATH="${1:-.}"
+          
+          echo "============================================"
+          echo "  Scanning IaC files in:  $SCAN_PATH"
+          echo "============================================"
+          
+          # Run Trivy config scan for misconfigurations
+          trivy config "$SCAN_PATH" \
+            --severity HIGH,CRITICAL \
+            --format table
+          
+          echo ""
+          echo "============================================"
+          echo "  Scanning for secrets in:  $SCAN_PATH"
+          echo "============================================"
+          
+          # Run Trivy filesystem scan for secrets
+          trivy fs "$SCAN_PATH" \
+            --scanners secret \
+            --format table
+        mode: '0755'
+
+    - name: "[Step 7] Add scripts to PATH"
+      copy:
+        dest:  /etc/profile.d/lazytrivy.sh
+        content: |
+          # LazyTrivy helper scripts
+          export PATH=$PATH:/opt/lazytrivy-scripts
+          
+          # Aliases for quick scanning
+          alias lt='lazytrivy'
+          alias lt-image='lazytrivy image'
+          alias lt-fs='lazytrivy filesystem'
+          alias lt-k8s='lazytrivy k8s'
+          alias scan-iac='/opt/lazytrivy-scripts/scan-iac.sh'
+        mode: '0644'
+
+    # ==========================================
+    # STEP 8: Verification & Summary
+    # ==========================================
+    - name: "[Step 8] Get installed versions"
+      shell: |
+        echo "Docker:  $(docker --version 2>/dev/null || echo 'Not installed')"
+        echo "Trivy: $(trivy --version 2>/dev/null | head -1 || echo 'Not installed')"
+        echo "LazyTrivy: v{{ lazytrivy_version }}"
+      register: versions_output
+      changed_when: false
+
+    - name: "[Step 8] Display Installation Summary"
+      debug:
+        msg: 
+          - ""
+          - "============================================"
+          - "  ✅ LazyTrivy Installation Complete!"
+          - "============================================"
+          - ""
+          - "INSTALLED COMPONENTS:"
+          - "{{ versions_output.stdout_lines }}"
+          - ""
+          - "============================================"
+          - "  HOW TO USE LazyTrivy"
+          - "============================================"
+          - ""
+          - "1  SCAN DOCKER IMAGES:"
+          - "   lazytrivy image"
+          - "   # Or scan specific image:"
+          - "   trivy image nginx: latest"
+          - ""
+          - "2  SCAN FILESYSTEM/IaC:"
+          - "   lazytrivy filesystem --path /path/to/code"
+          - "   # Or use helper script:"
+          - "   scan-iac /path/to/terraform"
+          - ""
+          - "3  SCAN KUBERNETES:"
+          - "   lazytrivy k8s"
+          - "   # Or with specific context:"
+          - "   lazytrivy k8s --context my-cluster"
+          - ""
+          - "4  QUICK ALIASES (after re-login):"
+          - "   lt          - LazyTrivy main"
+          - "   lt-image    - Image scanning mode"
+          - "   lt-fs       - Filesystem scanning mode"
+          - "   lt-k8s      - Kubernetes scanning mode"
+          - "   scan-iac    - IaC security scan"
+          - ""
+          - "5  SETTINGS:"
+          - "   Press ',' in LazyTrivy UI to open settings"
+          - "   Config file: {{ lazytrivy_config_dir }}/config.yml"
+          - ""
+          - "============================================"
+          - ""

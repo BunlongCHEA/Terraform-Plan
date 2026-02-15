@@ -29,6 +29,7 @@ PLAYBOOK_ANSIBLE="$SCRIPT_DIR/ansible_install_ansible.yml"
 PLAYBOOK_RANCHER="$SCRIPT_DIR/ansible_install_rancher.yml"
 PLAYBOOK_RANCHER_MULTI="$SCRIPT_DIR/ansible_install_rancher_multi.yml"
 PLAYBOOK_ARGOCD="$SCRIPT_DIR/ansible_install_argocd.yml"
+PLAYBOOK_PROMETHEUS="$SCRIPT_DIR/ansible_install_prometheus.yml"
 SERVER="os_servers"
 
 # ===========================================
@@ -288,6 +289,29 @@ run_ansible_argocd() {
     print_success "Ansible playbook completed"
 }
 
+# Run Ansible playbook for installing Prometheus Monitoring
+run_ansible_prometheus() {
+    print_header "Running Ansible Playbook - Install Prometheus"
+    
+    # INVENTORY="$SCRIPT_DIR/output/inventory.ini"
+    # PLAYBOOK="$SCRIPT_DIR/ansible_install_ansible.yml"
+    
+    if [ !  -f "$INVENTORY" ]; then
+        print_error "Inventory file not found: $INVENTORY"
+        print_info "Run 'terraform apply' first"
+        return 1
+    fi
+    
+    if [ ! -f "$PLAYBOOK_PROMETHEUS" ]; then
+        print_error "Playbook not found: $PLAYBOOK_PROMETHEUS"
+        return 1
+    fi
+    
+    print_info "Running playbook -- Installing Prometheus:  $PLAYBOOK_PROMETHEUS"
+    ansible-playbook -i "$INVENTORY" "$PLAYBOOK_PROMETHEUS"
+    print_success "Ansible playbook completed"
+}
+
 # Full workflow
 run_all() {
     print_header "Running Full Workflow"
@@ -318,16 +342,18 @@ run_all() {
     echo "  1) Install Ansible (Python3, pip, Ansible)"
     echo "  2) Install Rancher (Terraform, cert-manager, Kubectl, K3s, Helm)"
     echo "  3) Install ArgoCD (ArgoCD, cert-manager)"
-    echo "  4) All of the above"
-    echo "  5) Skip"
+    echo "  4) Install Prometheus (Prometheus, Node Exporter)"
+    echo "  5) All of the above"
+    echo "  6) Skip"
     read -p "Choice [1-4]: " install_choice
     
     case $install_choice in
         1) run_ansible_ansible ;;
         2) run_ansible_rancher ;;
         3) run_ansible_argocd ;;
-        4) run_ansible_ansible; run_ansible_rancher ; run_ansible_argocd ;;
-        5) print_info "Skipping software installation" ;;
+        4) run_ansible_prometheus ;;
+        5) run_ansible_ansible; run_ansible_rancher ; run_ansible_argocd ; run_ansible_prometheus ;;
+        6) print_info "Skipping software installation" ;;
     esac
     
     print_header "Workflow Complete!"
@@ -407,6 +433,9 @@ case "${1:-}" in
     argocd)
         run_ansible_argocd
         ;;
+    prometheus)
+        run_ansible_prometheus
+        ;;
     help|--help|-h)
         show_help
         ;;
@@ -421,9 +450,10 @@ case "${1:-}" in
         echo "  5) Run Ansible playbook (Install Ansible)"
         echo "  6) Run Ansible playbook (Install Rancher)"
         echo "  7) Run Ansible playbook (Install ArgoCD)"
-        echo "  8) Test Ansible connectivity"
-        echo "  9) Show outputs"
-        echo "  10) Destroy all resources"
+        echo "  8) Run Ansible playbook (Install Prometheus)"
+        echo "  9) Test Ansible connectivity"
+        echo "  10) Show outputs"
+        echo "  11) Destroy all resources"
         echo "  0) Exit"
         echo ""
         read -p "Enter choice [0-9]: " choice
@@ -436,9 +466,10 @@ case "${1:-}" in
             5) run_ansible_ansible ;;
             6) run_ansible_rancher ;;
             7) run_ansible_argocd ;;
-            8) test_ansible ;;
-            9) terraform_output ;;
-            10) terraform_destroy ;;
+            8) run_ansible_prometheus ;;
+            9) test_ansible ;;
+            10) terraform_output ;;
+            11) terraform_destroy ;;
             0) echo "Exited... "; exit 0 ;;
             *) print_error "Invalid option"; exit 1 ;;
         esac
