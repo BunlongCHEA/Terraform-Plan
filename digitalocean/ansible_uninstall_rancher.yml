@@ -1,0 +1,52 @@
+---
+- name: Uninstall Rancher and K3s
+  hosts: os_servers
+  become: yes
+  gather_facts: yes
+  tasks:
+    - name: Check if K3s is installed
+      stat:
+        path: /usr/local/bin/k3s
+      register: k3s_installed
+
+    - name: Run K3s uninstall script (for servers)
+      shell: /usr/local/bin/k3s-uninstall.sh
+      when: 
+        - k3s_installed.stat.exists
+        - "'master' in group_names or groups['os_servers'][0] == inventory_hostname"
+      ignore_errors: yes
+
+    - name: Run K3s agent uninstall script
+      shell: /usr/local/bin/k3s-agent-uninstall.sh
+      when: 
+        - k3s_installed.stat.exists
+        - "'worker' in group_names or groups['os_servers'][0] != inventory_hostname"
+      ignore_errors: yes
+
+    - name: Remove K3s directories
+      file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /etc/rancher
+        - /var/lib/rancher
+        - /var/lib/kubelet
+        - /var/lib/cni
+        - /etc/cni
+        - /opt/cni
+        - /run/k3s
+        - /run/flannel
+
+    - name: Remove Helm
+      file:
+        path: /usr/local/bin/helm
+        state: absent
+
+    - name: Remove kubectl
+      file:
+        path: /usr/local/bin/kubectl
+        state: absent
+
+    - name: Display completion message
+      debug:
+        msg: "✅ Rancher and K3s uninstalled successfully"

@@ -88,17 +88,93 @@
       changed_when: false
       when: inventory_hostname == first_master or is_single_node
 
+    # # ==========================================
+    # # STEP 2: Install Official ArgoCD Manifests (NO PATCHES YET!)
+    # # ==========================================
+    # - name: Install ArgoCD from official manifests
+    #   command: >
+    #     kubectl apply -n {{ argocd_namespace }} -f
+    #     https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
+    #   environment:
+    #     KUBECONFIG: "{{ kubeconfig_path }}"
+    #   register: argocd_install
+    #   changed_when: "'created' in argocd_install.stdout or 'configured' in argocd_install.stdout"
+    #   when: inventory_hostname == first_master or is_single_node
+
+    # - name: Wait for ArgoCD manifests to be applied
+    #   pause:
+    #     seconds: 10
+    #   when: inventory_hostname == first_master or is_single_node
+
     # ==========================================
-    # STEP 2: Install Official ArgoCD Manifests (NO PATCHES YET!)
+    # STEP 2: Install ArgoCD with Server-Side Apply (RECOMMENDED FIX)
     # ==========================================
-    - name: Install ArgoCD from official manifests
-      command: >
-        kubectl apply -n {{ argocd_namespace }} -f
-        https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
+    - name: Download ArgoCD install manifest
+      get_url:
+        url: https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
+        dest: /tmp/argocd-install.yaml
+        mode: '0644'
+      when: inventory_hostname == first_master or is_single_node
+
+    - name: Split CRDs from main manifest
+      shell: |
+        # Extract CRDs
+        kubectl apply -f /tmp/argocd-install.yaml \
+          --dry-run=client -o yaml | \
+          grep -A 10000 "kind: CustomResourceDefinition" > /tmp/argocd-crds.yaml || true
+        
+        # Extract non-CRD resources
+        kubectl apply -f /tmp/argocd-install.yaml \
+          --dry-run=client -o yaml | \
+          grep -v "kind: CustomResourceDefinition" > /tmp/argocd-resources.yaml || true
+      args:
+        executable: /bin/bash
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      when: inventory_hostname == first_master or is_single_node
+      ignore_errors: yes
+
+    - name: Apply ArgoCD CRDs with server-side apply (fixes annotation limit)
+      shell: |
+        export KUBECONFIG={{ kubeconfig_path }}
+        
+        # Apply CRDs with server-side apply and force-conflicts
+        kubectl apply -f /tmp/argocd-install.yaml \
+          --server-side=true \
+          --force-conflicts \
+          --field-manager=argocd-installer || \
+        kubectl apply -f /tmp/argocd-install.yaml \
+          --validate=false
+      args:
+        executable: /bin/bash
       environment:
         KUBECONFIG: "{{ kubeconfig_path }}"
       register: argocd_install
       changed_when: "'created' in argocd_install.stdout or 'configured' in argocd_install.stdout"
+      when: inventory_hostname == first_master or is_single_node
+
+    - name: Cleanup temporary manifests
+      file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /tmp/argocd-install.yaml
+        - /tmp/argocd-crds.yaml
+        - /tmp/argocd-resources.yaml
+      when: inventory_hostname == first_master or is_single_node
+
+    - name: Wait for ArgoCD CRDs to be established
+      shell: |
+        export KUBECONFIG={{ kubeconfig_path }}
+        kubectl wait --for condition=established \
+          crd/applications.argoproj.io \
+          crd/applicationsets.argoproj.io \
+          crd/appprojects.argoproj.io \
+          --timeout=60s
+      args:
+        executable: /bin/bash
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
       when: inventory_hostname == first_master or is_single_node
 
     - name: Wait for ArgoCD manifests to be applied
@@ -150,133 +226,133 @@
         var: argocd_jobs_final.stdout_lines
       when: inventory_hostname == first_master or is_single_node
 
-    # ==========================================
-    # STEP 4: Verify argocd-secret is Populated
-    # ==========================================
-    - name: Wait and check if argocd-secret has data
-      shell: |
-        export KUBECONFIG={{ kubeconfig_path }}
+    # # ==========================================
+    # # STEP 4: Verify argocd-secret is Populated
+    # # ==========================================
+    # - name: Wait and check if argocd-secret has data
+    #   shell: |
+    #     export KUBECONFIG={{ kubeconfig_path }}
         
-        # Retry check for populated secret
-        for i in {1..20}; do
-          DATA_SIZE=$(kubectl get secret argocd-secret -n {{ argocd_namespace }} -o jsonpath="{.data}" 2>/dev/null | wc -c)
-          if [ "$DATA_SIZE" -gt 2 ]; then
-            echo "Secret has data (size: $DATA_SIZE)"
-            exit 0
-          fi
-          echo "Attempt $i: Secret empty, waiting..."
-          sleep 10
-        done
+    #     # Retry check for populated secret
+    #     for i in {1..20}; do
+    #       DATA_SIZE=$(kubectl get secret argocd-secret -n {{ argocd_namespace }} -o jsonpath="{.data}" 2>/dev/null | wc -c)
+    #       if [ "$DATA_SIZE" -gt 2 ]; then
+    #         echo "Secret has data (size: $DATA_SIZE)"
+    #         exit 0
+    #       fi
+    #       echo "Attempt $i: Secret empty, waiting..."
+    #       sleep 10
+    #     done
         
-        echo "Secret still empty after 200 seconds"
-        exit 1
-      args:
-        executable: /bin/bash
-      environment:
-        KUBECONFIG: "{{ kubeconfig_path }}"
-      register: secret_check
-      ignore_errors: yes
-      when:  inventory_hostname == first_master or is_single_node
+    #     echo "Secret still empty after 200 seconds"
+    #     exit 1
+    #   args:
+    #     executable: /bin/bash
+    #   environment:
+    #     KUBECONFIG: "{{ kubeconfig_path }}"
+    #   register: secret_check
+    #   ignore_errors: yes
+    #   when:  inventory_hostname == first_master or is_single_node
 
-    - name: Display secret check result
-      debug:
-        msg: "{{ secret_check.stdout_lines }}"
-      when:  inventory_hostname == first_master or is_single_node
+    # - name: Display secret check result
+    #   debug:
+    #     msg: "{{ secret_check.stdout_lines }}"
+    #   when:  inventory_hostname == first_master or is_single_node
 
-    # ==========================================
-    # STEP 5: Create argocd-redis Secret (If Missing)
-    # ==========================================
-    - name: Create argocd-redis secret if missing
-      shell: |
-        export KUBECONFIG={{ kubeconfig_path }}
+    # # ==========================================
+    # # STEP 5: Create argocd-redis Secret (If Missing)
+    # # ==========================================
+    # - name: Create argocd-redis secret if missing
+    #   shell: |
+    #     export KUBECONFIG={{ kubeconfig_path }}
         
-        if kubectl get secret argocd-redis -n {{ argocd_namespace }} &>/dev/null; then
-          echo "argocd-redis secret already exists"
-          exit 0
-        fi
+    #     if kubectl get secret argocd-redis -n {{ argocd_namespace }} &>/dev/null; then
+    #       echo "argocd-redis secret already exists"
+    #       exit 0
+    #     fi
         
-        echo "Creating argocd-redis secret..."
-        REDIS_PASSWORD=$(openssl rand -base64 32)
+    #     echo "Creating argocd-redis secret..."
+    #     REDIS_PASSWORD=$(openssl rand -base64 32)
         
-        kubectl create secret generic argocd-redis \
-          -n {{ argocd_namespace }} \
-          --from-literal=auth="$REDIS_PASSWORD" \
-          --dry-run=client -o yaml | kubectl apply -f -
+    #     kubectl create secret generic argocd-redis \
+    #       -n {{ argocd_namespace }} \
+    #       --from-literal=auth="$REDIS_PASSWORD" \
+    #       --dry-run=client -o yaml | kubectl apply -f -
         
-        echo "argocd-redis secret created"
-      args:
-        executable: /bin/bash
-      environment: 
-        KUBECONFIG: "{{ kubeconfig_path }}"
-      register: redis_secret_create
-      when: inventory_hostname == first_master or is_single_node
+    #     echo "argocd-redis secret created"
+    #   args:
+    #     executable: /bin/bash
+    #   environment: 
+    #     KUBECONFIG: "{{ kubeconfig_path }}"
+    #   register: redis_secret_create
+    #   when: inventory_hostname == first_master or is_single_node
 
-    - name:  Verify argocd-redis secret exists
-      command: kubectl get secret argocd-redis -n {{ argocd_namespace }}
-      environment:
-        KUBECONFIG: "{{ kubeconfig_path }}"
-      register:  redis_secret_verify
-      retries: 5
-      delay:  5
-      until: redis_secret_verify.rc == 0
-      when: inventory_hostname == first_master or is_single_node
+    # - name:  Verify argocd-redis secret exists
+    #   command: kubectl get secret argocd-redis -n {{ argocd_namespace }}
+    #   environment:
+    #     KUBECONFIG: "{{ kubeconfig_path }}"
+    #   register:  redis_secret_verify
+    #   retries: 5
+    #   delay:  5
+    #   until: redis_secret_verify.rc == 0
+    #   when: inventory_hostname == first_master or is_single_node
 
-    # ==========================================
-    # STEP 6: Fallback - Create argocd-secret if Still Empty
-    # ==========================================
-    - name: Check if argocd-secret is still empty
-      shell: |
-        export KUBECONFIG={{ kubeconfig_path }}
-        kubectl get secret argocd-secret -n {{ argocd_namespace }} -o jsonpath="{.data}" | grep -q "admin" && echo "has_data" || echo "empty"
-      args:
-        executable: /bin/bash
-      environment:
-        KUBECONFIG: "{{ kubeconfig_path }}"
-      register: secret_final_check
-      changed_when: false
-      when:  inventory_hostname == first_master or is_single_node
+    # # ==========================================
+    # # STEP 6: Fallback - Create argocd-secret if Still Empty
+    # # ==========================================
+    # - name: Check if argocd-secret is still empty
+    #   shell: |
+    #     export KUBECONFIG={{ kubeconfig_path }}
+    #     kubectl get secret argocd-secret -n {{ argocd_namespace }} -o jsonpath="{.data}" | grep -q "admin" && echo "has_data" || echo "empty"
+    #   args:
+    #     executable: /bin/bash
+    #   environment:
+    #     KUBECONFIG: "{{ kubeconfig_path }}"
+    #   register: secret_final_check
+    #   changed_when: false
+    #   when:  inventory_hostname == first_master or is_single_node
 
-    - name:  Manually create argocd-secret if still empty
-      when: 
-        - (inventory_hostname == first_master or is_single_node)
-        - secret_final_check.stdout == "empty"
-      block:
-        - name: Generate admin password
-          set_fact:
-            argocd_admin_password: "{{ lookup('password', '/dev/null chars=ascii_letters,digits length=16') }}"
+    # - name:  Manually create argocd-secret if still empty
+    #   when: 
+    #     - (inventory_hostname == first_master or is_single_node)
+    #     - secret_final_check.stdout == "empty"
+    #   block:
+    #     - name: Generate admin password
+    #       set_fact:
+    #         argocd_admin_password: "{{ lookup('password', '/dev/null chars=ascii_letters,digits length=16') }}"
 
-        - name: Delete empty argocd-secret
-          command: kubectl delete secret argocd-secret -n {{ argocd_namespace }} --ignore-not-found=true
-          environment:
-            KUBECONFIG:  "{{ kubeconfig_path }}"
+    #     - name: Delete empty argocd-secret
+    #       command: kubectl delete secret argocd-secret -n {{ argocd_namespace }} --ignore-not-found=true
+    #       environment:
+    #         KUBECONFIG:  "{{ kubeconfig_path }}"
 
-        - name: Wait for secret deletion
-          pause:
-            seconds: 3
+    #     - name: Wait for secret deletion
+    #       pause:
+    #         seconds: 3
 
-        - name: Create argocd-secret with password
-          shell: |
-            export KUBECONFIG={{ kubeconfig_path }}
-            ADMIN_PW="{{ argocd_admin_password }}"
-            MTIME=$(date +%s)
+    #     - name: Create argocd-secret with password
+    #       shell: |
+    #         export KUBECONFIG={{ kubeconfig_path }}
+    #         ADMIN_PW="{{ argocd_admin_password }}"
+    #         MTIME=$(date +%s)
             
-            kubectl -n {{ argocd_namespace }} create secret generic argocd-secret \
-              --from-literal=admin.password="$ADMIN_PW" \
-              --from-literal=admin.passwordMtime="$MTIME" \
-              --dry-run=client -o yaml | kubectl apply -f -
+    #         kubectl -n {{ argocd_namespace }} create secret generic argocd-secret \
+    #           --from-literal=admin.password="$ADMIN_PW" \
+    #           --from-literal=admin.passwordMtime="$MTIME" \
+    #           --dry-run=client -o yaml | kubectl apply -f -
             
-            echo "Created argocd-secret with password"
-          args:
-            executable:  /bin/bash
-          environment: 
-            KUBECONFIG: "{{ kubeconfig_path }}"
+    #         echo "Created argocd-secret with password"
+    #       args:
+    #         executable:  /bin/bash
+    #       environment: 
+    #         KUBECONFIG: "{{ kubeconfig_path }}"
 
-        - name: Display created password
-          debug:
-            msg: 
-              - "⚠️ ArgoCD bootstrap job failed - created secret manually"
-              - "Admin password: {{ argocd_admin_password }}"
-              - "SAVE THIS PASSWORD - you will need it to login!"
+    #     - name: Display created password
+    #       debug:
+    #         msg: 
+    #           - "⚠️ ArgoCD bootstrap job failed - created secret manually"
+    #           - "Admin password: {{ argocd_admin_password }}"
+    #           - "SAVE THIS PASSWORD - you will need it to login!"
 
     # ==========================================
     # STEP 7: Wait for All Pods to Be Ready
@@ -287,14 +363,14 @@
         kubectl wait --for=condition=ready pod \
           -l app.kubernetes.io/part-of=argocd \
           -n {{ argocd_namespace }} \
-          --timeout=300s
+          --timeout=60s
       args:
         executable: /bin/bash
       environment: 
         KUBECONFIG: "{{ kubeconfig_path }}"
       register: pods_ready
-      retries: 5
-      delay: 30
+      retries: 3
+      delay: 10
       until: pods_ready.rc == 0
       ignore_errors: yes
       when:  inventory_hostname == first_master or is_single_node
@@ -420,14 +496,14 @@
         kubectl wait --for=condition=ready pod \
           -l app.kubernetes.io/part-of=argocd \
           -n {{ argocd_namespace }} \
-          --timeout=300s
+          --timeout=60s
       args:
         executable: /bin/bash
       environment:
         KUBECONFIG: "{{ kubeconfig_path }}"
       register: pods_ready_final
-      retries: 5
-      delay: 30
+      retries: 3
+      delay: 10
       until: pods_ready_final.rc == 0
       ignore_errors: yes
       when:  inventory_hostname == first_master or is_single_node

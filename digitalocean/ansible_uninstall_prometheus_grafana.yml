@@ -1,0 +1,85 @@
+---
+- name: Uninstall Prometheus and Grafana Monitoring Stack
+  hosts: os_servers
+  become: yes
+  gather_facts: yes
+  tasks:
+    - name: Stop and disable services
+      systemd:
+        name: "{{ item }}"
+        state: stopped
+        enabled: no
+      loop:
+        - prometheus
+        - node_exporter
+        - grafana-server
+      ignore_errors: yes
+
+    - name: Remove systemd service files
+      file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /etc/systemd/system/prometheus.service
+        - /etc/systemd/system/node_exporter.service
+
+    - name: Remove binaries
+      file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /usr/local/bin/prometheus
+        - /usr/local/bin/promtool
+        - /usr/local/bin/node_exporter
+
+    - name: "[Debian/Ubuntu] Uninstall Grafana"
+      apt:
+        name: grafana
+        state: absent
+        purge: yes
+      when: ansible_os_family == "Debian"
+      ignore_errors: yes
+
+    - name: "[RedHat] Uninstall Grafana"
+      yum:
+        name: grafana
+        state: absent
+      when: ansible_os_family == "RedHat"
+      ignore_errors: yes
+
+    - name: Remove configuration directories
+      file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /etc/prometheus
+        - /etc/grafana
+
+    - name: Remove data directories
+      file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /var/lib/prometheus
+        - /var/lib/grafana
+        - /var/log/prometheus
+        - /var/log/grafana
+
+    - name: Remove users
+      user:
+        name: "{{ item }}"
+        state: absent
+        remove: yes
+      loop:
+        - prometheus
+        - node_exporter
+        - grafana
+      ignore_errors: yes
+
+    - name: Reload systemd
+      systemd:
+        daemon_reload: yes
+
+    - name: Display completion message
+      debug:
+        msg: "✅ Prometheus & Grafana uninstalled successfully"

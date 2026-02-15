@@ -32,6 +32,11 @@ PLAYBOOK_ARGOCD="$SCRIPT_DIR/ansible_install_argocd.yml"
 PLAYBOOK_PROMETHEUS="$SCRIPT_DIR/ansible_install_prometheus.yml"
 SERVER="os_servers"
 
+# Uninstall playbook paths
+UNINSTALL_PROMETHEUS="$SCRIPT_DIR/ansible_uninstall_prometheus_grafana.yml"
+UNINSTALL_ARGOCD="$SCRIPT_DIR/ansible_uninstall_argocd.yml"
+UNINSTALL_RANCHER="$SCRIPT_DIR/ansible_uninstall_rancher.yml"
+
 # ===========================================
 # Functions
 # ===========================================
@@ -72,6 +77,9 @@ create_directories() {
 
     mkdir -p rancher
     print_success "Created: rancher/"
+
+    mkdir -p argocd
+    print_success "Created: argocd/"
 }
 
 # Set DigitalOcean token
@@ -312,6 +320,368 @@ run_ansible_prometheus() {
     print_success "Ansible playbook completed"
 }
 
+# ===========================================
+# UNINSTALL FUNCTIONS
+# ===========================================
+# Create uninstall playbooks
+create_uninstall_playbooks() {
+    print_header "Creating Uninstall Playbooks"
+    
+    # Create Prometheus & Grafana uninstall playbook
+    cat > "$UNINSTALL_PROMETHEUS" << 'EOF'
+---
+- name: Uninstall Prometheus and Grafana Monitoring Stack
+  hosts: os_servers
+  become: yes
+  gather_facts: yes
+  tasks:
+    - name: Stop and disable services
+      systemd:
+        name: "{{ item }}"
+        state: stopped
+        enabled: no
+      loop:
+        - prometheus
+        - node_exporter
+        - grafana-server
+      ignore_errors: yes
+
+    - name: Remove systemd service files
+      file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /etc/systemd/system/prometheus.service
+        - /etc/systemd/system/node_exporter.service
+
+    - name: Remove binaries
+      file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /usr/local/bin/prometheus
+        - /usr/local/bin/promtool
+        - /usr/local/bin/node_exporter
+
+    - name: "[Debian/Ubuntu] Uninstall Grafana"
+      apt:
+        name: grafana
+        state: absent
+        purge: yes
+      when: ansible_os_family == "Debian"
+      ignore_errors: yes
+
+    - name: "[RedHat] Uninstall Grafana"
+      yum:
+        name: grafana
+        state: absent
+      when: ansible_os_family == "RedHat"
+      ignore_errors: yes
+
+    - name: Remove configuration directories
+      file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /etc/prometheus
+        - /etc/grafana
+
+    - name: Remove data directories
+      file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /var/lib/prometheus
+        - /var/lib/grafana
+        - /var/log/prometheus
+        - /var/log/grafana
+
+    - name: Remove users
+      user:
+        name: "{{ item }}"
+        state: absent
+        remove: yes
+      loop:
+        - prometheus
+        - node_exporter
+        - grafana
+      ignore_errors: yes
+
+    - name: Reload systemd
+      systemd:
+        daemon_reload: yes
+
+    - name: Display completion message
+      debug:
+        msg: "✅ Prometheus & Grafana uninstalled successfully"
+EOF
+    
+    # Create ArgoCD uninstall playbook
+    cat > "$UNINSTALL_ARGOCD" << 'EOF'
+---
+- name: Uninstall ArgoCD from Kubernetes
+  hosts: os_servers
+  become: yes
+  gather_facts: yes
+  vars:
+    argocd_namespace: argocd
+    kubeconfig_path: /etc/rancher/k3s/k3s.yaml
+    first_master: "{{ groups['os_servers'][0] }}"
+    is_single_node: "{{ groups['os_servers'] | length == 1 }}"
+  
+  tasks:
+    - name: Check if ArgoCD namespace exists
+      command: kubectl get namespace {{ argocd_namespace }}
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: ns_check
+      failed_when: false
+      changed_when: false
+      when: inventory_hostname == first_master or is_single_node
+
+    - name: Delete ArgoCD applications
+      shell: kubectl delete applications --all -n {{ argocd_namespace }} --timeout=60s
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      when: 
+        - (inventory_hostname == first_master or is_single_node)
+        - ns_check.rc == 0
+      ignore_errors: yes
+
+    - name: Delete ArgoCD namespace
+      command: kubectl delete namespace {{ argocd_namespace }} --timeout=120s
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      when: 
+        - (inventory_hostname == first_master or is_single_node)
+        - ns_check.rc == 0
+      ignore_errors: yes
+
+    - name: Delete ArgoCD CRDs
+      shell: |
+        kubectl delete crd applications.argoproj.io 2>/dev/null || true
+        kubectl delete crd applicationsets.argoproj.io 2>/dev/null || true
+        kubectl delete crd appprojects.argoproj.io 2>/dev/null || true
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      when: inventory_hostname == first_master or is_single_node
+      ignore_errors: yes
+
+    - name: Delete ArgoCD ClusterRoles
+      shell: |
+        kubectl delete clusterrole argocd-application-controller 2>/dev/null || true
+        kubectl delete clusterrole argocd-server 2>/dev/null || true
+        kubectl delete clusterrole argocd-applicationset-controller 2>/dev/null || true
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      when: inventory_hostname == first_master or is_single_node
+      ignore_errors: yes
+
+    - name: Delete ArgoCD ClusterRoleBindings
+      shell: |
+        kubectl delete clusterrolebinding argocd-application-controller 2>/dev/null || true
+        kubectl delete clusterrolebinding argocd-server 2>/dev/null || true
+        kubectl delete clusterrolebinding argocd-applicationset-controller 2>/dev/null || true
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      when: inventory_hostname == first_master or is_single_node
+      ignore_errors: yes
+
+    - name: Remove local ArgoCD files
+      file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /opt/argocd-patches
+        - /tmp/argocd-manifests
+        - /tmp/argocd-ingress
+      when: inventory_hostname == first_master or is_single_node
+
+    - name: Display completion message
+      debug:
+        msg: "✅ ArgoCD uninstalled successfully"
+      when: inventory_hostname == first_master or is_single_node
+EOF
+    
+    # Create Rancher/K3s uninstall playbook
+    cat > "$UNINSTALL_RANCHER" << 'EOF'
+---
+- name: Uninstall Rancher and K3s
+  hosts: os_servers
+  become: yes
+  gather_facts: yes
+  tasks:
+    - name: Check if K3s is installed
+      stat:
+        path: /usr/local/bin/k3s
+      register: k3s_installed
+
+    - name: Run K3s uninstall script (for servers)
+      shell: /usr/local/bin/k3s-uninstall.sh
+      when: 
+        - k3s_installed.stat.exists
+        - "'master' in group_names or groups['os_servers'][0] == inventory_hostname"
+      ignore_errors: yes
+
+    - name: Run K3s agent uninstall script
+      shell: /usr/local/bin/k3s-agent-uninstall.sh
+      when: 
+        - k3s_installed.stat.exists
+        - "'worker' in group_names or groups['os_servers'][0] != inventory_hostname"
+      ignore_errors: yes
+
+    - name: Remove K3s directories
+      file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /etc/rancher
+        - /var/lib/rancher
+        - /var/lib/kubelet
+        - /var/lib/cni
+        - /etc/cni
+        - /opt/cni
+        - /run/k3s
+        - /run/flannel
+
+    - name: Remove Helm
+      file:
+        path: /usr/local/bin/helm
+        state: absent
+
+    - name: Remove kubectl
+      file:
+        path: /usr/local/bin/kubectl
+        state: absent
+
+    - name: Display completion message
+      debug:
+        msg: "✅ Rancher and K3s uninstalled successfully"
+EOF
+    
+    print_success "Uninstall playbooks created"
+}
+
+# Uninstall Prometheus & Grafana
+uninstall_prometheus() {
+    print_header "Uninstalling Prometheus & Grafana"
+    
+    if [ ! -f "$INVENTORY" ]; then
+        print_error "Inventory not found: $INVENTORY"
+        return 1
+    fi
+    
+    create_uninstall_playbooks
+    
+    print_warning "This will remove:"
+    print_warning "  - Prometheus"
+    print_warning "  - Node Exporter"
+    print_warning "  - Grafana"
+    print_warning "  - All metrics data"
+    print_warning "  - All dashboards"
+    echo ""
+    
+    read -p "Continue? (yes/no): " confirm
+    [ "$confirm" != "yes" ] && return 0
+    
+    ansible-playbook -i "$INVENTORY" "$UNINSTALL_PROMETHEUS" -v
+    print_success "Prometheus & Grafana uninstalled"
+}
+
+# Uninstall ArgoCD
+uninstall_argocd() {
+    print_header "Uninstalling ArgoCD"
+    
+    if [ ! -f "$INVENTORY" ]; then
+        print_error "Inventory not found: $INVENTORY"
+        return 1
+    fi
+    
+    create_uninstall_playbooks
+    
+    print_warning "This will remove:"
+    print_warning "  - ArgoCD server"
+    print_warning "  - All ArgoCD applications"
+    print_warning "  - ArgoCD CRDs"
+    print_warning "  - ArgoCD namespace"
+    echo ""
+    
+    read -p "Continue? (yes/no): " confirm
+    [ "$confirm" != "yes" ] && return 0
+    
+    ansible-playbook -i "$INVENTORY" "$UNINSTALL_ARGOCD" -v
+    print_success "ArgoCD uninstalled"
+}
+
+# Uninstall Rancher & K3s
+uninstall_rancher() {
+    print_header "Uninstalling Rancher & K3s"
+    
+    if [ ! -f "$INVENTORY" ]; then
+        print_error "Inventory not found: $INVENTORY"
+        return 1
+    fi
+    
+    create_uninstall_playbooks
+    
+    print_warning "This will remove:"
+    print_warning "  - Rancher server"
+    print_warning "  - K3s (entire Kubernetes cluster)"
+    print_warning "  - All deployed applications"
+    print_warning "  - All Kubernetes data"
+    print_warning "  - Helm"
+    print_warning "  - kubectl"
+    echo ""
+    
+    read -p "Are you ABSOLUTELY sure? (type 'yes' to confirm): " confirm
+    [ "$confirm" != "yes" ] && return 0
+    
+    ansible-playbook -i "$INVENTORY" "$UNINSTALL_RANCHER" -v
+    print_success "Rancher & K3s uninstalled"
+}
+
+# Uninstall menu
+uninstall_menu() {
+    print_header "Uninstall Menu"
+    
+    echo "Select what to uninstall:"
+    echo "  1) Prometheus & Grafana"
+    echo "  2) ArgoCD"
+    echo "  3) Rancher & K3s (WARNING: Removes entire cluster)"
+    echo "  4) Everything (Prometheus + ArgoCD + Rancher)"
+    echo "  5) Back to main menu"
+    echo ""
+    read -p "Enter Choice: " uninstall_choice
+    
+    case $uninstall_choice in
+        1)
+            uninstall_prometheus
+            ;;
+        2)
+            uninstall_argocd
+            ;;
+        3)
+            uninstall_rancher
+            ;;
+        4)
+            print_warning "This will uninstall EVERYTHING!"
+            read -p "Type 'yes' to confirm: " confirm
+            if [ "$confirm" == "yes" ]; then
+                uninstall_prometheus
+                uninstall_argocd
+                uninstall_rancher
+            fi
+            ;;
+        5)
+            return 0
+            ;;
+        *)
+            print_error "Invalid choice"
+            ;;
+    esac
+}
+
+
 # Full workflow
 run_all() {
     print_header "Running Full Workflow"
@@ -345,7 +715,7 @@ run_all() {
     echo "  4) Install Prometheus (Prometheus, Node Exporter)"
     echo "  5) All of the above"
     echo "  6) Skip"
-    read -p "Choice [1-4]: " install_choice
+    read -p "Enter Choice: " install_choice
     
     case $install_choice in
         1) run_ansible_ansible ;;
@@ -375,15 +745,17 @@ Commands:
   test           Test Ansible connectivity
   ansible        Run basic software Ansible playbook
   rancher        Run Rancher prerequisites Ansible playbook
+  prometheus     Run Prometheus & Grafana installation playbook
+  uninstall      Show uninstall menu
   help           Show this help
 
 SSH Key Location:  $SSH_PRIVATE_KEY
 
 Examples:
   $0 all              # Full workflow with options
-  $0 rancher-full     # Create droplets and install Rancher prereqs
-  $0 rancher          # Only run Rancher Ansible playbook
-  $0 clone-rancher    # Clone Rancher repo locally
+  $0 rancher          # Install Rancher
+  $0 uninstall        # Uninstall components
+  $0 destroy          # Destroy all infrastructure
 "
 }
 
@@ -453,10 +825,11 @@ case "${1:-}" in
         echo "  8) Run Ansible playbook (Install Prometheus)"
         echo "  9) Test Ansible connectivity"
         echo "  10) Show outputs"
-        echo "  11) Destroy all resources"
+        echo "  11) Uninstall components"
+        echo "  12) Destroy all resources"
         echo "  0) Exit"
         echo ""
-        read -p "Enter choice [0-9]: " choice
+        read -p "Enter choice: " choice
         
         case $choice in
             1) run_all ;;
@@ -469,7 +842,8 @@ case "${1:-}" in
             8) run_ansible_prometheus ;;
             9) test_ansible ;;
             10) terraform_output ;;
-            11) terraform_destroy ;;
+            11) uninstall_menu ;;
+            12) terraform_destroy ;;
             0) echo "Exited... "; exit 0 ;;
             *) print_error "Invalid option"; exit 1 ;;
         esac

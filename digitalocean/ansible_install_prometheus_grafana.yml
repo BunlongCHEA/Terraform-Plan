@@ -1,0 +1,810 @@
+---
+- name: Install Prometheus and Grafana Monitoring Stack on DigitalOcean droplets
+  hosts: os_servers
+  become: yes
+  gather_facts: yes
+  vars:
+    prometheus_version: "3.9.1"
+    grafana_version: "12.3.0"
+    node_exporter_version: "1.8.2"
+    
+    # Prometheus configuration
+    prometheus_user: "prometheus"
+    prometheus_group: "prometheus"
+    prometheus_dir: "/etc/prometheus"
+    prometheus_data_dir: "/var/lib/prometheus"
+    prometheus_log_dir: "/var/log/prometheus"
+    
+    # Node Exporter configuration
+    node_exporter_user: "node_exporter"
+    node_exporter_group: "node_exporter"
+    
+    # Grafana configuration
+    grafana_user: "grafana"
+    grafana_group: "grafana"
+    grafana_data_dir: "/var/lib/grafana"
+    grafana_log_dir: "/var/log/grafana"
+    grafana_config_dir: "/etc/grafana"
+    grafana_admin_user: "admin"
+    grafana_admin_password: "admin@123"  # Change this!
+    
+    # Ingress configuration
+    prometheus_domain: "prometheus.bunlong.uk"
+    grafana_domain: "grafana.bunlong.uk"
+    monitoring_namespace: "monitoring"
+    
+    # OS family detection
+    supported_debian_family: "Debian"
+    supported_redhat_family: "RedHat"
+
+  tasks:
+    # ==========================================
+    # Prerequisites (All OS)
+    # ==========================================
+    - name: Display installation information
+      debug:
+        msg:
+          - "=========================================="
+          - "Installing Monitoring Stack"
+          - "=========================================="
+          - "Prometheus: {{ prometheus_version }}"
+          - "Grafana: {{ grafana_version }}"
+          - "Node Exporter: {{ node_exporter_version }}"
+          - "OS: {{ ansible_distribution }} {{ ansible_distribution_version }}"
+          - "=========================================="
+
+    - name: Create Prometheus system group
+      group:
+        name: "{{ prometheus_group }}"
+        system: yes
+        state: present
+
+    - name: Create Prometheus system user
+      user:
+        name: "{{ prometheus_user }}"
+        group: "{{ prometheus_group }}"
+        system: yes
+        shell: /sbin/nologin
+        createhome: no
+        state: present
+
+    - name: Create Node Exporter system group
+      group:
+        name: "{{ node_exporter_group }}"
+        system: yes
+        state: present
+
+    - name: Create Node Exporter system user
+      user:
+        name: "{{ node_exporter_user }}"
+        group: "{{ node_exporter_group }}"
+        system: yes
+        shell: /sbin/nologin
+        createhome: no
+        state: present
+
+    # ==========================================
+    # Install Required Packages
+    # ==========================================
+    - name: "[Debian/Ubuntu] Install required packages"
+      apt:
+        name:
+          - curl
+          - tar
+          - wget
+          - gnupg2
+          - apt-transport-https
+          - software-properties-common
+          - adduser
+          - libfontconfig1
+          - musl
+        state: present
+        update_cache: yes
+      when: ansible_os_family == supported_debian_family
+
+    - name: "[RedHat] Install required packages"
+      yum:
+        name:
+          - curl
+          - tar
+          - wget
+          - gnupg2
+          - fontconfig
+          - freetype
+          - urw-fonts
+        state: present
+      when: ansible_os_family == supported_redhat_family
+
+    # ==========================================
+    # PROMETHEUS INSTALLATION
+    # ==========================================
+    - name: Create Prometheus directories
+      file:
+        path: "{{ item }}"
+        state: directory
+        owner: "{{ prometheus_user }}"
+        group: "{{ prometheus_group }}"
+        mode: '0755'
+      loop:
+        - "{{ prometheus_dir }}"
+        - "{{ prometheus_data_dir }}"
+        - "{{ prometheus_log_dir }}"
+
+    - name: Check if Prometheus is already installed
+      stat:
+        path: /usr/local/bin/prometheus
+      register: prometheus_binary
+
+    - name: Download Prometheus
+      get_url:
+        url: "https://github.com/prometheus/prometheus/releases/download/v{{ prometheus_version }}/prometheus-{{ prometheus_version }}.linux-amd64.tar.gz"
+        dest: "/tmp/prometheus-{{ prometheus_version }}.linux-amd64.tar.gz"
+        mode: '0644'
+      when: not prometheus_binary.stat.exists
+
+    - name: Extract Prometheus
+      unarchive:
+        src: "/tmp/prometheus-{{ prometheus_version }}.linux-amd64.tar.gz"
+        dest: "/tmp"
+        remote_src: yes
+      when: not prometheus_binary.stat.exists
+
+    - name: Copy Prometheus binaries
+      copy:
+        src: "/tmp/prometheus-{{ prometheus_version }}.linux-amd64/{{ item }}"
+        dest: "/usr/local/bin/{{ item }}"
+        owner: "{{ prometheus_user }}"
+        group: "{{ prometheus_group }}"
+        mode: '0755'
+        remote_src: yes
+      loop:
+        - prometheus
+        - promtool
+      when: not prometheus_binary.stat.exists
+
+    - name: Create Prometheus configuration file
+      copy:
+        dest: "{{ prometheus_dir }}/prometheus.yml"
+        owner: "{{ prometheus_user }}"
+        group: "{{ prometheus_group }}"
+        mode: '0644'
+        content: |
+          global:
+            scrape_interval: 15s
+            evaluation_interval: 15s
+            external_labels:
+              cluster: 'monitoring-cluster'
+              environment: 'production'
+
+          # Alertmanager configuration (optional)
+          alerting:
+            alertmanagers:
+              - static_configs:
+                  - targets: []
+
+          # Load rules once and periodically evaluate them
+          rule_files:
+            # - "alerts.yml"
+            # - "rules.yml"
+
+          # Scrape configurations
+          scrape_configs:
+            # Prometheus itself
+            - job_name: 'prometheus'
+              static_configs:
+                - targets: ['localhost:9090']
+                  labels:
+                    instance: '{{ ansible_hostname }}'
+
+            # Node Exporter
+            - job_name: 'node_exporter'
+              static_configs:
+                - targets: ['localhost:9100']
+                  labels:
+                    instance: '{{ ansible_hostname }}'
+
+            # Grafana
+            - job_name: 'grafana'
+              static_configs:
+                - targets: ['localhost:3000']
+                  labels:
+                    instance: '{{ ansible_hostname }}'
+
+    - name: Create Prometheus systemd service file
+      copy:
+        dest: /etc/systemd/system/prometheus.service
+        mode: '0644'
+        content: |
+          [Unit]
+          Description=Prometheus Monitoring System
+          Documentation=https://prometheus.io/docs/introduction/overview/
+          After=network-online.target
+          Wants=network-online.target
+
+          [Service]
+          Type=simple
+          User={{ prometheus_user }}
+          Group={{ prometheus_group }}
+          ExecReload=/bin/kill -HUP $MAINPID
+          ExecStart=/usr/local/bin/prometheus \
+            --config.file={{ prometheus_dir }}/prometheus.yml \
+            --storage.tsdb.path={{ prometheus_data_dir }} \
+            --web.listen-address=0.0.0.0:9090 \
+            --web.external-url= \
+            --storage.tsdb.retention.time=15d \
+            --storage.tsdb.retention.size=10GB
+
+          SyslogIdentifier=prometheus
+          Restart=always
+          RestartSec=5
+          LimitNOFILE=65536
+
+          [Install]
+          WantedBy=multi-user.target
+
+    # ==========================================
+    # NODE EXPORTER INSTALLATION
+    # ==========================================
+    - name: Check if Node Exporter is already installed
+      stat:
+        path: /usr/local/bin/node_exporter
+      register: node_exporter_binary
+
+    - name: Download Node Exporter
+      get_url:
+        url: "https://github.com/prometheus/node_exporter/releases/download/v{{ node_exporter_version }}/node_exporter-{{ node_exporter_version }}.linux-amd64.tar.gz"
+        dest: "/tmp/node_exporter-{{ node_exporter_version }}.linux-amd64.tar.gz"
+        mode: '0644'
+      when: not node_exporter_binary.stat.exists
+
+    - name: Extract Node Exporter
+      unarchive:
+        src: "/tmp/node_exporter-{{ node_exporter_version }}.linux-amd64.tar.gz"
+        dest: "/tmp"
+        remote_src: yes
+      when: not node_exporter_binary.stat.exists
+
+    - name: Copy Node Exporter binary
+      copy:
+        src: "/tmp/node_exporter-{{ node_exporter_version }}.linux-amd64/node_exporter"
+        dest: "/usr/local/bin/node_exporter"
+        owner: "{{ node_exporter_user }}"
+        group: "{{ node_exporter_group }}"
+        mode: '0755'
+        remote_src: yes
+      when: not node_exporter_binary.stat.exists
+
+    - name: Create Node Exporter systemd service file
+      copy:
+        dest: /etc/systemd/system/node_exporter.service
+        mode: '0644'
+        content: |
+          [Unit]
+          Description=Node Exporter
+          Documentation=https://prometheus.io/docs/guides/node-exporter/
+          After=network-online.target
+          Wants=network-online.target
+
+          [Service]
+          Type=simple
+          User={{ node_exporter_user }}
+          Group={{ node_exporter_group }}
+          ExecStart=/usr/local/bin/node_exporter \
+            --collector.filesystem.mount-points-exclude=^/(sys|proc|dev|host|etc)($$|/) \
+            --collector.netclass.ignored-devices=^(veth.*|docker.*|br-.*|lo)$ \
+            --web.listen-address=0.0.0.0:9100
+
+          SyslogIdentifier=node_exporter
+          Restart=always
+          RestartSec=5
+
+          [Install]
+          WantedBy=multi-user.target
+
+    # ==========================================
+    # GRAFANA INSTALLATION
+    # ==========================================
+    - name: "[Debian/Ubuntu] Add Grafana GPG key"
+      apt_key:
+        url: https://apt.grafana.com/gpg.key
+        state: present
+      when: ansible_os_family == supported_debian_family
+
+    - name: "[Debian/Ubuntu] Add Grafana repository"
+      apt_repository:
+        repo: "deb https://apt.grafana.com stable main"
+        state: present
+        filename: grafana
+      when: ansible_os_family == supported_debian_family
+
+    - name: "[Debian/Ubuntu] Install Grafana"
+      apt:
+        name: "grafana={{ grafana_version }}"
+        state: present
+        update_cache: yes
+      when: ansible_os_family == supported_debian_family
+      ignore_errors: yes
+      register: grafana_apt_install
+
+    - name: "[Debian/Ubuntu] Install latest Grafana if specific version not available"
+      apt:
+        name: grafana
+        state: present
+      when: 
+        - ansible_os_family == supported_debian_family
+        - grafana_apt_install is failed
+
+    - name: "[RedHat] Add Grafana repository"
+      yum_repository:
+        name: grafana
+        description: Grafana Repository
+        baseurl: https://rpm.grafana.com
+        gpgcheck: yes
+        gpgkey: https://rpm.grafana.com/gpg.key
+        enabled: yes
+      when: ansible_os_family == supported_redhat_family
+
+    - name: "[RedHat] Install Grafana"
+      yum:
+        name: "grafana-{{ grafana_version }}"
+        state: present
+      when: ansible_os_family == supported_redhat_family
+      ignore_errors: yes
+      register: grafana_yum_install
+
+    - name: "[RedHat] Install latest Grafana if specific version not available"
+      yum:
+        name: grafana
+        state: present
+      when: 
+        - ansible_os_family == supported_redhat_family
+        - grafana_yum_install is failed
+
+    # ==========================================
+    # Configure Grafana
+    # ==========================================
+    - name: Create Grafana directories
+      file:
+        path: "{{ item }}"
+        state: directory
+        owner: "{{ grafana_user }}"
+        group: "{{ grafana_group }}"
+        mode: '0755'
+      loop:
+        - "{{ grafana_data_dir }}"
+        - "{{ grafana_log_dir }}"
+        - "{{ grafana_config_dir }}/provisioning"
+        - "{{ grafana_config_dir }}/provisioning/datasources"
+        - "{{ grafana_config_dir }}/provisioning/dashboards"
+
+    - name: Configure Grafana provisioning for Prometheus datasource
+      copy:
+        dest: "{{ grafana_config_dir }}/provisioning/datasources/prometheus.yml"
+        owner: "{{ grafana_user }}"
+        group: "{{ grafana_group }}"
+        mode: '0644'
+        content: |
+          apiVersion: 1
+
+          datasources:
+            - name: Prometheus
+              type: prometheus
+              access: proxy
+              url: http://localhost:9090
+              isDefault: true
+              editable: true
+              jsonData:
+                timeInterval: "15s"
+                httpMethod: POST
+                queryTimeout: "60s"
+
+    - name: Configure Grafana dashboard provisioning
+      copy:
+        dest: "{{ grafana_config_dir }}/provisioning/dashboards/default.yml"
+        owner: "{{ grafana_user }}"
+        group: "{{ grafana_group }}"
+        mode: '0644'
+        content: |
+          apiVersion: 1
+
+          providers:
+            - name: 'Default'
+              orgId: 1
+              folder: ''
+              type: file
+              disableDeletion: false
+              updateIntervalSeconds: 10
+              allowUiUpdates: true
+              options:
+                path: /var/lib/grafana/dashboards
+                foldersFromFilesStructure: true
+
+    - name: Create dashboard directory
+      file:
+        path: /var/lib/grafana/dashboards
+        state: directory
+        owner: "{{ grafana_user }}"
+        group: "{{ grafana_group }}"
+        mode: '0755'
+
+    - name: Update Grafana configuration
+      lineinfile:
+        path: /etc/grafana/grafana.ini
+        regexp: "{{ item.regexp }}"
+        line: "{{ item.line }}"
+        state: present
+      loop:
+        - { regexp: '^;?http_addr =', line: 'http_addr = 0.0.0.0' }
+        - { regexp: '^;?http_port =', line: 'http_port = 3000' }
+        - { regexp: '^;?domain =', line: 'domain = {{ grafana_domain }}' }
+        - { regexp: '^;?root_url =', line: 'root_url = https://{{ grafana_domain }}' }
+        - { regexp: '^;?provisioning =', line: 'provisioning = {{ grafana_config_dir }}/provisioning' }
+
+    # ==========================================
+    # Configure Firewall (if active)
+    # ==========================================
+    - name: "[Debian/Ubuntu] Allow monitoring ports through UFW"
+      community.general.ufw:
+        rule: allow
+        port: "{{ item }}"
+        proto: tcp
+      loop:
+        - '9090'  # Prometheus
+        - '9100'  # Node Exporter
+        - '3000'  # Grafana
+      when: ansible_os_family == supported_debian_family
+      ignore_errors: yes
+
+    - name: "[RedHat] Allow monitoring ports through firewalld"
+      firewalld:
+        port: "{{ item }}/tcp"
+        permanent: yes
+        state: enabled
+        immediate: yes
+      loop:
+        - '9090'  # Prometheus
+        - '9100'  # Node Exporter
+        - '3000'  # Grafana
+      when: ansible_os_family == supported_redhat_family
+      ignore_errors: yes
+
+    # ==========================================
+    # Start and Enable Services
+    # ==========================================
+    - name: Reload systemd daemon
+      systemd:
+        daemon_reload: yes
+
+    - name: Enable and start Node Exporter service
+      systemd:
+        name: node_exporter
+        state: started
+        enabled: yes
+
+    - name: Enable and start Prometheus service
+      systemd:
+        name: prometheus
+        state: started
+        enabled: yes
+
+    - name: Enable and start Grafana service
+      systemd:
+        name: grafana-server
+        state: started
+        enabled: yes
+
+    # ==========================================
+    # Wait for Services to Start
+    # ==========================================
+    - name: Wait for Node Exporter to start
+      wait_for:
+        port: 9100
+        delay: 5
+        timeout: 30
+
+    - name: Wait for Prometheus to start
+      wait_for:
+        port: 9090
+        delay: 5
+        timeout: 30
+
+    - name: Wait for Grafana to start
+      wait_for:
+        port: 3000
+        delay: 10
+        timeout: 60
+
+    # ==========================================
+    # Kubernetes Integration (if K3s is installed)
+    # ==========================================
+    - name: Check if K3s is installed
+      stat:
+        path: /usr/local/bin/kubectl
+      register: kubectl_check
+
+    - name: Check if K3s kubeconfig exists
+      stat:
+        path: /etc/rancher/k3s/k3s.yaml
+      register: kubeconfig_check
+
+    - name: Deploy monitoring to Kubernetes
+      when: 
+        - kubectl_check.stat.exists
+        - kubeconfig_check.stat.exists
+      block:
+        - name: Create monitoring namespace
+          command: kubectl create namespace {{ monitoring_namespace }}
+          environment:
+            KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+          ignore_errors: yes
+
+        - name: Create Prometheus ConfigMap
+          shell: |
+            kubectl create configmap prometheus-config \
+              --from-file={{ prometheus_dir }}/prometheus.yml \
+              -n {{ monitoring_namespace }} \
+              --dry-run=client -o yaml | kubectl apply -f -
+          environment:
+            KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+
+        - name: Create Prometheus Service
+          shell: |
+            cat <<EOF | kubectl apply -f -
+            apiVersion: v1
+            kind: Service
+            metadata:
+              name: prometheus
+              namespace: {{ monitoring_namespace }}
+            spec:
+              selector:
+                app: prometheus
+              ports:
+              - port: 9090
+                targetPort: 9090
+              type: ClusterIP
+            EOF
+          environment:
+            KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+
+        - name: Create Grafana Service
+          shell: |
+            cat <<EOF | kubectl apply -f -
+            apiVersion: v1
+            kind: Service
+            metadata:
+              name: grafana
+              namespace: {{ monitoring_namespace }}
+            spec:
+              selector:
+                app: grafana
+              ports:
+              - port: 3000
+                targetPort: 3000
+              type: ClusterIP
+            EOF
+          environment:
+            KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+
+        - name: Create Prometheus Ingress
+          shell: |
+            cat <<EOF | kubectl apply -f -
+            apiVersion: networking.k8s.io/v1
+            kind: Ingress
+            metadata:
+              name: prometheus-ingress
+              namespace: {{ monitoring_namespace }}
+              annotations:
+                kubernetes.io/ingress.class: "traefik"
+                cert-manager.io/cluster-issuer: "letsencrypt-prod"
+                traefik.ingress.kubernetes.io/router.entrypoints: web,websecure
+                traefik.ingress.kubernetes.io/router.tls: "true"
+            spec:
+              tls:
+              - hosts:
+                - "{{ prometheus_domain }}"
+                secretName: tls-prometheus-ingress
+              rules:
+              - host: "{{ prometheus_domain }}"
+                http:
+                  paths:
+                  - path: /
+                    pathType: Prefix
+                    backend:
+                      service:
+                        name: prometheus
+                        port:
+                          number: 9090
+            EOF
+          environment:
+            KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+
+        - name: Create Grafana Ingress
+          shell: |
+            cat <<EOF | kubectl apply -f -
+            apiVersion: networking.k8s.io/v1
+            kind: Ingress
+            metadata:
+              name: grafana-ingress
+              namespace: {{ monitoring_namespace }}
+              annotations:
+                kubernetes.io/ingress.class: "traefik"
+                cert-manager.io/cluster-issuer: "letsencrypt-prod"
+                traefik.ingress.kubernetes.io/router.entrypoints: web,websecure
+                traefik.ingress.kubernetes.io/router.tls: "true"
+            spec:
+              tls:
+              - hosts:
+                - "{{ grafana_domain }}"
+                secretName: tls-grafana-ingress
+              rules:
+              - host: "{{ grafana_domain }}"
+                http:
+                  paths:
+                  - path: /
+                    pathType: Prefix
+                    backend:
+                      service:
+                        name: grafana
+                        port:
+                          number: 3000
+            EOF
+          environment:
+            KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+
+        - name: Wait for Ingress to be ready
+          pause:
+            seconds: 10
+
+        - name: Get Prometheus Ingress status
+          command: kubectl get ingress prometheus-ingress -n {{ monitoring_namespace }}
+          environment:
+            KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+          register: prometheus_ingress_status
+          ignore_errors: yes
+
+        - name: Get Grafana Ingress status
+          command: kubectl get ingress grafana-ingress -n {{ monitoring_namespace }}
+          environment:
+            KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+          register: grafana_ingress_status
+          ignore_errors: yes
+
+    # ==========================================
+    # Verify Services
+    # ==========================================
+    - name: Check Node Exporter status
+      systemd:
+        name: node_exporter
+      register: node_exporter_status
+
+    - name: Check Prometheus status
+      systemd:
+        name: prometheus
+      register: prometheus_status
+
+    - name: Check Grafana status
+      systemd:
+        name: grafana-server
+      register: grafana_status
+
+    - name: Verify Node Exporter is responding
+      uri:
+        url: http://localhost:9100/metrics
+        method: GET
+        status_code: 200
+      register: node_exporter_health
+      ignore_errors: yes
+
+    - name: Verify Prometheus is responding
+      uri:
+        url: http://localhost:9090/-/healthy
+        method: GET
+        status_code: 200
+      register: prometheus_health
+      ignore_errors: yes
+
+    - name: Verify Grafana is responding
+      uri:
+        url: http://localhost:3000/api/health
+        method: GET
+        status_code: 200
+      register: grafana_health
+      ignore_errors: yes
+
+    # ==========================================
+    # Cleanup Temporary Files
+    # ==========================================
+    - name: Clean up temporary files
+      file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - "/tmp/prometheus-{{ prometheus_version }}.linux-amd64.tar.gz"
+        - "/tmp/prometheus-{{ prometheus_version }}.linux-amd64"
+        - "/tmp/node_exporter-{{ node_exporter_version }}.linux-amd64.tar.gz"
+        - "/tmp/node_exporter-{{ node_exporter_version }}.linux-amd64"
+
+    # ==========================================
+    # Display Installation Summary
+    # ==========================================
+    - name: Display installation summary
+      debug:
+        msg:
+          - ""
+          - "=========================================="
+          - "  ✅ Monitoring Stack Installation Complete!"
+          - "=========================================="
+          - ""
+          - "📊 PROMETHEUS"
+          - "  Version: {{ prometheus_version }}"
+          - "  Status: {{ prometheus_status.status.ActiveState }}"
+          - "  Local URL: http://{{ ansible_default_ipv4.address }}:9090"
+          - "  {% if kubectl_check.stat.exists %}Public URL: https://{{ prometheus_domain }}{% endif %}"
+          - "  Health: {{ 'OK' if prometheus_health.status == 200 else 'FAILED' }}"
+          - "  Config: {{ prometheus_dir }}/prometheus.yml"
+          - "  Data: {{ prometheus_data_dir }}"
+          - ""
+          - "📈 NODE EXPORTER"
+          - "  Version: {{ node_exporter_version }}"
+          - "  Status: {{ node_exporter_status.status.ActiveState }}"
+          - "  URL: http://{{ ansible_default_ipv4.address }}:9100"
+          - "  Health: {{ 'OK' if node_exporter_health.status == 200 else 'FAILED' }}"
+          - ""
+          - "📉 GRAFANA"
+          - "  Version: {{ grafana_version }}"
+          - "  Status: {{ grafana_status.status.ActiveState }}"
+          - "  Local URL: http://{{ ansible_default_ipv4.address }}:3000"
+          - "  {% if kubectl_check.stat.exists %}Public URL: https://{{ grafana_domain }}{% endif %}"
+          - "  Health: {{ 'OK' if grafana_health.status == 200 else 'FAILED' }}"
+          - "  Username: {{ grafana_admin_user }}"
+          - "  Password: {{ grafana_admin_password }}"
+          - ""
+          - "{% if kubectl_check.stat.exists %}"
+          - "🌐 KUBERNETES INGRESS"
+          - "  Prometheus: https://{{ prometheus_domain }}"
+          - "  Grafana: https://{{ grafana_domain }}"
+          - "  Namespace: {{ monitoring_namespace }}"
+          - "  TLS: Enabled (Let's Encrypt)"
+          - "{% endif %}"
+          - ""
+          - "=========================================="
+          - "  Next Steps:"
+          - "=========================================="
+          - ""
+          - "{% if kubectl_check.stat.exists %}"
+          - "1. Access Grafana: https://{{ grafana_domain }}"
+          - "{% else %}"
+          - "1. Access Grafana: http://{{ ansible_default_ipv4.address }}:3000"
+          - "{% endif %}"
+          - "2. Login with {{ grafana_admin_user }}/{{ grafana_admin_password }}"
+          - "3. Change your password"
+          - "4. Prometheus datasource is already configured!"
+          - ""
+          - "5. Import popular dashboards:"
+          - "   - Node Exporter Full: ID 1860"
+          - "   - Prometheus Stats: ID 3662"
+          - "   - Go to: Dashboards → Import → Enter ID"
+          - ""
+          - "{% if kubectl_check.stat.exists %}"
+          - "6. DNS Configuration:"
+          - "   Point {{ prometheus_domain }} to {{ ansible_default_ipv4.address }}"
+          - "   Point {{ grafana_domain }} to {{ ansible_default_ipv4.address }}"
+          - "{% endif %}"
+          - ""
+          - "=========================================="
+          - "  Service Management Commands:"
+          - "=========================================="
+          - ""
+          - "systemctl status prometheus"
+          - "systemctl status node_exporter"
+          - "systemctl status grafana-server"
+          - ""
+          - "journalctl -u prometheus -f"
+          - "journalctl -u grafana-server -f"
+          - ""
+          - "{% if kubectl_check.stat.exists %}"
+          - "kubectl get ingress -n {{ monitoring_namespace }}"
+          - "kubectl get certificates -n {{ monitoring_namespace }}"
+          - "{% endif %}"
+          - ""
+          - "=========================================="
