@@ -29,7 +29,7 @@ PLAYBOOK_ANSIBLE="$SCRIPT_DIR/ansible_install_ansible.yml"
 PLAYBOOK_RANCHER="$SCRIPT_DIR/ansible_install_rancher.yml"
 PLAYBOOK_RANCHER_MULTI="$SCRIPT_DIR/ansible_install_rancher_multi.yml"
 PLAYBOOK_ARGOCD="$SCRIPT_DIR/ansible_install_argocd.yml"
-PLAYBOOK_PROMETHEUS="$SCRIPT_DIR/ansible_install_prometheus.yml"
+PLAYBOOK_PROMETHEUS="$SCRIPT_DIR/ansible_install_prometheus_grafana.yml"
 SERVER="os_servers"
 
 # Uninstall playbook paths
@@ -334,6 +334,9 @@ create_uninstall_playbooks() {
   hosts: os_servers
   become: yes
   gather_facts: yes
+  vars:
+    namespace: monitoring
+    kubeconfig_path: /etc/rancher/k3s/k3s.yaml
   tasks:
     - name: Stop and disable services
       systemd:
@@ -376,6 +379,12 @@ create_uninstall_playbooks() {
         name: grafana
         state: absent
       when: ansible_os_family == "RedHat"
+      ignore_errors: yes
+    
+    - name: Delete namespace
+      command: kubectl delete namespace {{ namespace }} --timeout=120s
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
       ignore_errors: yes
 
     - name: Remove configuration directories

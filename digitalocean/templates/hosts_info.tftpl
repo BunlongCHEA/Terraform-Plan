@@ -26,4 +26,46 @@ QUICK SSH COMMANDS (Copy & Paste)
 ssh -i "${ssh_key_path}" root@${droplet.ipv4_address}
 %{ endfor ~}
 
+--------------------------------------------------------------------------------
+Ansible Commands
+--------------------------------------------------------------------------------
+# Test connectivity:
+ansible -i output/inventory.ini os_servers -m ping
+
+# Run playbook:
+ansible-playbook -i output/inventory.ini ansible_install_ansible.yml
+ansible-playbook -i output/inventory.ini ansible_install_rancher.yml
+ansible-playbook -i output/inventory.ini ansible_install_argocd.yml
+ansible-playbook -i output/inventory.ini ansible_install_prometheus_grafana.yml
+
+--------------------------------------------------------------------------------
+K3s Access
+--------------------------------------------------------------------------------
+%{ for idx, droplet in droplets ~}
+%{ if idx == 0 ~}
+# K3s Server (Master Node):
+Server IP: ${droplet.ipv4_address}
+API Server: https://${droplet.ipv4_address}:6443
+
+# Get K3s Token:
+ssh -i "${ssh_key_path}" root@${droplet.ipv4_address} "sudo cat /var/lib/rancher/k3s/server/node-token"
+
+# Get Kubeconfig:
+ssh -i "${ssh_key_path}" root@${droplet.ipv4_address} "sudo cat /etc/rancher/k3s/k3s.yaml"
+
+%{ endif ~}
+%{ endfor ~}
+
+--------------------------------------------------------------------------------
+GitLab CI/CD Variables
+--------------------------------------------------------------------------------
+%{ for idx, droplet in droplets ~}
+%{ if idx == 0 ~}
+# Add these to GitLab CI/CD Variables:
+DO_K3S_SERVER=https://${droplet.ipv4_address}:6443
+DO_K3S_TOKEN=<get from command above>
+
+%{ endif ~}
+%{ endfor ~}
+
 ================================================================================

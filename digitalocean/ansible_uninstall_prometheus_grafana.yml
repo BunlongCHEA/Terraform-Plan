@@ -3,6 +3,9 @@
   hosts: os_servers
   become: yes
   gather_facts: yes
+  vars:
+    namespace: monitoring
+    kubeconfig_path: /etc/rancher/k3s/k3s.yaml
   tasks:
     - name: Stop and disable services
       systemd:
@@ -45,6 +48,12 @@
         name: grafana
         state: absent
       when: ansible_os_family == "RedHat"
+      ignore_errors: yes
+    
+    - name: Delete namespace
+      command: kubectl delete namespace {{ namespace }} --timeout=120s
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
       ignore_errors: yes
 
     - name: Remove configuration directories

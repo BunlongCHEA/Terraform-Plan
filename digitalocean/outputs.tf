@@ -34,7 +34,7 @@ REM Option 1: Run via WSL (if Ansible is installed in WSL)
 REM wsl ansible-playbook -i output/inventory.ini ansible_install_software.yml
 
 REM Option 2: Run via Python/pip Ansible on Windows
-ansible-playbook -i "${replace(abspath("${path.module}/output/inventory.ini"), "\\", "/")}" "${replace(abspath("${path. module}/ansible_install_software.yml"), "\\", "/")}"
+ansible-playbook -i output/inventory.ini ansible_install_software.yml
 
 echo. 
 echo =========================================
@@ -78,4 +78,13 @@ output "ansible_command" {
 output "inventory_file" {
   description = "Path to Ansible inventory file"
   value       = abspath("${path.module}/output/inventory.ini")
+}
+
+output "k3s_credentials" {
+  description = "K3s cluster access credentials"
+  value = {
+    server_url = "https://${digitalocean_droplet.os_family[0].ipv4_address}:6443"
+    message    = "SSH to server and run: sudo cat /var/lib/rancher/k3s/server/node-token"
+  }
+  depends_on = [null_resource.wait_for_ssh]
 }
