@@ -401,3 +401,45 @@
           - ""
           - "============================================"
           - ""
+
+    - name: Set access info content
+      set_fact:
+        lazytrivy_access_info: |
+          ===========================================================
+            ✅ LazyTrivy Installed Successfully!
+          ===========================================================
+
+          You can access the LazyTrivy UI and start scanning your applications and infrastructure for vulnerabilities and misconfigurations.
+
+          To access the LazyTrivy UI, follow these steps:
+
+          1. SSH into your server:
+             ssh {{ ansible_user }}@{{ inventory_hostname }}
+
+          2. Run the following command to start LazyTrivy:
+             lazytrivy
+
+          3. Open your web browser and navigate to:
+             http://localhost:8080
+
+          4. Use the following credentials to log in:
+             Username: admin
+             Password: admin
+
+           Note: For security reasons, please change the default password after logging in for the first time.
+
+           Happy Scanning! 🚀
+
+    - name: Save access information to remote server
+      copy:
+        dest: /root/lazytrivy-access-info.txt
+        content: "{{ lazytrivy_access_info }}"
+        mode: "0600"
+
+    - name: Save access information to local machine
+      delegate_to: localhost
+      become: no
+      copy:
+        dest: ./rancher/lazytrivy-access-info.txt
+        content: "{{ lazytrivy_access_info }}"
+        mode: "0644"

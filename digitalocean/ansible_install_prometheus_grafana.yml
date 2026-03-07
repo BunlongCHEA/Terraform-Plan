@@ -177,8 +177,9 @@
             scrape_interval: 15s
             evaluation_interval: 15s
             external_labels:
-              cluster: 'monitoring-cluster'
+              cluster: 'k3s-cluster'
               environment: 'production'
+              prometheus: 'main'
 
           scrape_configs:
             - job_name: 'prometheus'
@@ -198,6 +199,28 @@
                 - targets: ['localhost:3000']
                   labels:
                     instance: '{{ ansible_hostname }}'
+
+            # Kubernetes API Server (if K3s is running)
+            - job_name: 'kubernetes-apiservers'
+              kubernetes_sd_configs:
+              - role: endpoints
+              scheme: https
+              tls_config:
+                ca_file: /var/lib/rancher/k3s/server/tls/server-ca.crt
+              bearer_token_file: /var/lib/rancher/k3s/server/token
+              relabel_configs:
+              - source_labels: [__meta_kubernetes_namespace, __meta_kubernetes_service_name, __meta_kubernetes_endpoint_port_name]
+                action: keep
+                regex: default;kubernetes;https
+
+            # Kubernetes nodes
+            - job_name: 'kubernetes-nodes'
+              kubernetes_sd_configs:
+              - role: node
+              scheme: https
+              tls_config:
+                ca_file: /var/lib/rancher/k3s/server/tls/server-ca.crt
+              bearer_token_file: /var/lib/rancher/k3s/server/token
 
     - name: Create Prometheus systemd service file
       copy:
@@ -624,6 +647,7 @@
           - "  Commands:"
           - "=========================================="
           - ""
+          - 'kubectl get ingress -A -o custom-columns="NAMESPACE:.metadata.namespace,INGRESS NAME:.metadata.name,SECRET NAMES:.spec.tls[*].secretName"'
           - "kubectl get ingress -n {{ monitoring_namespace }}"
           - "kubectl get svc -n {{ monitoring_namespace }}"
           - "kubectl get certificates -n {{ monitoring_namespace }}"
@@ -638,7 +662,8 @@
           - ""
           - "Import popular dashboards:"
           - "   - Node Exporter Full: ID 1860"
-          - "   - Prometheus Stats: ID 3662"
+          - "   - Prometheus Stats: ID 3662, 19105"
+          - "   - Kubernetes Stats: ID 15757"
           - "   - Go to: Dashboards → Import → Enter ID"
           - ""
           - "=========================================="
@@ -653,3 +678,83 @@
           - "journalctl -u grafana-server -f"
           - ""
           - "=========================================="
+
+    - name: Set access info content
+      set_fact:
+        prometheus_grafana_access_info: |
+          ==========================================
+            ✅ Monitoring Stack Installed!
+          ==========================================
+
+          📊 PROMETHEUS
+            Local: http://{{ ansible_default_ipv4.address }}:9090
+            Public: https://{{ prometheus_domain }}
+
+          📈 NODE EXPORTER
+            Local: http://{{ ansible_default_ipv4.address }}:9100
+
+          📉 GRAFANA
+            Local: http://{{ ansible_default_ipv4.address }}:3000
+            Public: https://{{ grafana_domain }}
+            Username: {{ grafana_admin_user }}
+            Password: {{ grafana_admin_password }}
+
+          ==========================================
+            DNS Configuration:
+          ==========================================
+
+          {{ prometheus_domain }} → {{ ansible_default_ipv4.address }}
+          {{ grafana_domain }} → {{ ansible_default_ipv4.address }}
+
+          ==========================================
+            Commands:
+          ==========================================
+
+          kubectl get ingress -A -o custom-columns="NAMESPACE:.metadata.namespace,INGRESS NAME:.metadata.name,SECRET NAMES:.spec.tls[*].secretName"
+          kubectl get certificates --all-namespaces
+          
+          # Delete the old certificate secret
+          kubectl delete secret kyc-blockchain-tls -n kyc-blockchain
+          # Verify it's deleted
+          kubectl get secret kyc-blockchain-tls -n kyc-blockchain
+          
+          kubectl get ingress -n {{ monitoring_namespace }}
+          kubectl get svc -n {{ monitoring_namespace }}
+          kubectl get certificates -n {{ monitoring_namespace }}
+          kubectl get pods -n {{ monitoring_namespace }}
+          kubectl logs -n {{ monitoring_namespace }} -l app=prometheus
+
+          ==========================================
+            Next Steps:
+          ==========================================
+
+          Import popular dashboards:
+             - Node Exporter Full: ID 1860
+             - Prometheus Stats: ID 3662, 19105
+             - Kubernetes Stats: ID 15757
+             - Go to: Dashboards → Import → Enter ID
+
+          ==========================================
+            Service Management Commands:
+          ==========================================
+
+          systemctl status prometheus
+          systemctl status node_exporter
+          systemctl status grafana-server
+
+          journalctl -u prometheus -f
+          journalctl -u grafana-server -f
+
+    - name: Save access information to remote server
+      copy:
+        dest: /root/prometheus-grafana-access-info.txt
+        content: "{{ prometheus_grafana_access_info }}"
+        mode: "0600"
+
+    - name: Save access information to local machine
+      delegate_to: localhost
+      become: no
+      copy:
+        dest: ./rancher/prometheus-grafana-access-info.txt
+        content: "{{ prometheus_grafana_access_info }}"
+        mode: "0644"

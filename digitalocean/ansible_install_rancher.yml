@@ -562,6 +562,10 @@
           ===========================================================
           USEFUL COMMANDS
           ===========================================================
+
+          # List All certificates in all namespaces
+          'kubectl get ingress -A -o custom-columns="NAMESPACE:.metadata.namespace,INGRESS NAME:.metadata.name,SECRET NAMES:.spec.tls[*].secretName"
+          kubectl get certificates --all-namespaces
           
           # Check Rancher status
           kubectl get pods -n cattle-system
@@ -592,6 +596,24 @@
           kubectl get ingress -A
           
           ===========================================================
+          USEFUL COMMANDS FOR TROUBLESHOOTING in Project
+          ===========================================================
+
+          # Delete the old certificate secret
+          kubectl delete secret kyc-blockchain-tls -n kyc-blockchain
+
+          # Verify it's deleted
+          kubectl get secret kyc-blockchain-tls -n kyc-blockchain
+
+          # Get pod details
+          kubectl get pods -n kyc-blockchain
+
+          # Describe the pod to see what's happening
+          kubectl describe pod kyc-blockchain-0 -n kyc-blockchain
+
+          # Describe the certificate to see if there are any issues with it
+          kubectl describe certificate kyc-blockchain-tls -n kyc-blockchain
+
         mode: "0600"
 
     - name: Save access information to remote server

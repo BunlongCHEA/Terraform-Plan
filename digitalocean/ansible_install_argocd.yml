@@ -544,6 +544,97 @@
           - ""
       when: inventory_hostname == first_master or is_single_node
 
+    - name: Set access info content
+      set_fact:
+        argocd_access_info: |
+          ==========================================
+            ✅ ArgoCD Installation Complete!
+          ==========================================
+          
+          📍 Namespace: {{ argocd_namespace }}
+          🌐 Server IP: {{ server_ip }}
+          
+          🔑 Admin Credentials:
+            Username: admin
+            Password: {{ argocd_password.stdout }}
+          
+          📋 Pod Status:
+          {{ final_pods_status.stdout_lines | join('\n') }}
+          
+          🌐 Services:
+          {{ argocd_services.stdout_lines | join('\n') }}
+          
+          ==========================================
+            Access ArgoCD:
+          ==========================================
+          
+          🌍 Option 1: HTTPS Ingress (Recommended)
+            URL: https://{{ argocd_domain }}
+            NOTE: Configure DNS to point {{ argocd_domain }} to {{ server_ip }}
+            TLS: Automatic (Let's Encrypt via cert-manager)
+          
+          🔧 Option 2: Port Forward (Quick Test)
+            kubectl port-forward svc/argocd-server -n {{ argocd_namespace }} 8080:80
+            URL: http://localhost:8080
+          
+          🖥️ Option 3: Direct Access (NodePort/LoadBalancer)
+            http://{{ server_ip }}:30080 (if NodePort configured)
+          
+          ==========================================
+            Next Steps:
+          ==========================================
+          
+          1. Configure DNS: {{ argocd_domain }} → {{ server_ip }}
+          2. Access: https://{{ argocd_domain }}
+          3. Login with admin/{{ argocd_password.stdout }}
+          4. Change password (User Info → Update Password)
+          5. Add Git repositories (Settings → Repositories)
+          6. Create applications (Applications → New App)
+
+          ==========================================
+          Useful Commands:
+          ==========================================
+
+          # Get password again
+          kubectl -n {{ argocd_namespace }} get secret argocd-initial-admin-secret -o jsonpath='{.data.password}' | base64 -d
+
+          # Check pods
+          kubectl get pods -n {{ argocd_namespace }}
+
+          # Check ingress
+          kubectl get ingress -n {{ argocd_namespace }}
+
+          # View logs
+          kubectl logs -n {{ argocd_namespace }} -l app.kubernetes.io/name=argocd-server
+
+          # Port forward
+          kubectl port-forward svc/argocd-server -n {{ argocd_namespace }} 8080:80
+
+          # List All certificates in all namespaces
+          kubectl get certificates --all-namespaces
+
+          # Delete the old certificate secret
+          kubectl delete secret kyc-blockchain-tls -n kyc-blockchain
+
+          # Verify it's deleted
+          kubectl get secret kyc-blockchain-tls -n kyc-blockchain
+
+      when: inventory_hostname == first_master or is_single_node
+
+    - name: Save access information to remote server
+      copy:
+        dest: /root/argocd-access-info.txt
+        content: "{{ argocd_access_info }}"
+        mode: "0600"
+
+    - name: Save access information to local machine
+      delegate_to: localhost
+      become: no
+      copy:
+        dest: ./rancher/argocd-access-info.txt
+        content: "{{ argocd_access_info }}"
+        mode: "0644"
+
     # ==========================================
     # Cleanup
     # ==========================================
