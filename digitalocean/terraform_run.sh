@@ -330,99 +330,307 @@ create_uninstall_playbooks() {
     # Create Prometheus & Grafana uninstall playbook
     cat > "$UNINSTALL_PROMETHEUS" << 'EOF'
 ---
-- name: Uninstall Prometheus and Grafana Monitoring Stack
+- name: Uninstall In-Cluster Prometheus & Grafana Monitoring Stack
   hosts: os_servers
   become: yes
   gather_facts: yes
   vars:
-    namespace: monitoring
     kubeconfig_path: /etc/rancher/k3s/k3s.yaml
+    monitoring_namespace: monitoring
+    helm_release_name: kube-prometheus-stack
+
   tasks:
-    - name: Stop and disable services
-      systemd:
-        name: "{{ item }}"
-        state: stopped
-        enabled: no
-      loop:
-        - prometheus
-        - node_exporter
-        - grafana-server
+    # ==========================================
+    # Pre-flight Checks
+    # ==========================================
+    - name: Display uninstall information
+      debug:
+        msg:
+          - "=========================================="
+          - "Uninstalling In-Cluster Monitoring Stack"
+          - "=========================================="
+          - "Helm Release: {{ helm_release_name }}"
+          - "Namespace: {{ monitoring_namespace }}"
+          - "=========================================="
+
+    - name: Check if Helm is installed
+      command: helm version --short
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: helm_check
       ignore_errors: yes
+      changed_when: false
 
-    - name: Remove systemd service files
-      file:
-        path: "{{ item }}"
-        state: absent
-      loop:
-        - /etc/systemd/system/prometheus.service
-        - /etc/systemd/system/node_exporter.service
-
-    - name: Remove binaries
-      file:
-        path: "{{ item }}"
-        state: absent
-      loop:
-        - /usr/local/bin/prometheus
-        - /usr/local/bin/promtool
-        - /usr/local/bin/node_exporter
-
-    - name: "[Debian/Ubuntu] Uninstall Grafana"
-      apt:
-        name: grafana
-        state: absent
-        purge: yes
-      when: ansible_os_family == "Debian"
+    - name: Check if release exists
+      shell: helm list -n {{ monitoring_namespace }} -q
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: helm_releases
       ignore_errors: yes
+      changed_when: false
 
-    - name: "[RedHat] Uninstall Grafana"
-      yum:
-        name: grafana
-        state: absent
-      when: ansible_os_family == "RedHat"
+    - name: Display current releases
+      debug:
+        msg: "Current Helm releases in {{ monitoring_namespace }}: {{ helm_releases.stdout_lines | default(['none']) }}"
+
+    # ==========================================
+    # Remove Ingress Resources First
+    # ==========================================
+    - name: Delete monitoring ingress resources
+      shell: kubectl delete ingress --all -n {{ monitoring_namespace }} --timeout=60s
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
       ignore_errors: yes
-    
-    - name: Delete namespace
-      command: kubectl delete namespace {{ namespace }} --timeout=120s
+      register: ingress_delete
+      changed_when: "'deleted' in ingress_delete.stdout"
+
+    # ==========================================
+    # Uninstall Helm Release
+    # ==========================================
+    - name: Uninstall kube-prometheus-stack Helm release
+      shell: |
+        helm uninstall {{ helm_release_name }} \
+          --namespace {{ monitoring_namespace }} \
+          --timeout 5m
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: helm_uninstall
+      ignore_errors: yes
+      changed_when: "'uninstalled' in helm_uninstall.stdout"
+
+    - name: Display Helm uninstall output
+      debug:
+        var: helm_uninstall.stdout_lines
+      when: helm_uninstall.stdout is defined
+
+    # ==========================================
+    # Clean Up CRDs (Helm does NOT remove CRDs)
+    # ==========================================
+    # IMPORTANT: Helm intentionally does NOT delete CRDs
+    # on uninstall to prevent accidental data loss.
+    # We must remove them manually.
+    # ==========================================
+    - name: Get monitoring CRDs
+      shell: kubectl get crd -o name | grep monitoring.coreos.com
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: monitoring_crds
+      ignore_errors: yes
+      changed_when: false
+
+    - name: Display CRDs to be removed
+      debug:
+        msg: "CRDs to remove: {{ monitoring_crds.stdout_lines | default(['none found']) }}"
+
+    - name: Delete monitoring CRDs
+      shell: |
+        kubectl delete crd \
+          alertmanagerconfigs.monitoring.coreos.com \
+          alertmanagers.monitoring.coreos.com \
+          podmonitors.monitoring.coreos.com \
+          probes.monitoring.coreos.com \
+          prometheusagents.monitoring.coreos.com \
+          prometheuses.monitoring.coreos.com \
+          prometheusrules.monitoring.coreos.com \
+          scrapeconfigs.monitoring.coreos.com \
+          servicemonitors.monitoring.coreos.com \
+          thanosrulers.monitoring.coreos.com \
+          --timeout=120s
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      ignore_errors: yes
+      register: crd_delete
+      changed_when: "'deleted' in crd_delete.stdout"
+
+    # ==========================================
+    # Clean Up PVCs (Persistent Data)
+    # ==========================================
+    - name: Get PVCs in monitoring namespace
+      command: kubectl get pvc -n {{ monitoring_namespace }} -o name
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: monitoring_pvcs
+      ignore_errors: yes
+      changed_when: false
+
+    - name: Display PVCs to be removed
+      debug:
+        msg: "PVCs to remove: {{ monitoring_pvcs.stdout_lines | default(['none found']) }}"
+
+    - name: Delete PVCs in monitoring namespace
+      shell: kubectl delete pvc --all -n {{ monitoring_namespace }} --timeout=120s
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      ignore_errors: yes
+      register: pvc_delete
+      changed_when: "'deleted' in pvc_delete.stdout"
+
+    # ==========================================
+    # Clean Up TLS Secrets (cert-manager)
+    # ==========================================
+    - name: Delete TLS secrets
+      shell: |
+        kubectl delete secret \
+          tls-prometheus-ingress \
+          tls-grafana-ingress \
+          -n {{ monitoring_namespace }} \
+          --timeout=60s
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      ignore_errors: yes
+      register: secret_delete
+      changed_when: "'deleted' in secret_delete.stdout"
+
+    # ==========================================
+    # Clean Up Any Remaining Resources
+    # ==========================================
+    - name: Delete any remaining resources in monitoring namespace
+      shell: |
+        kubectl delete all --all -n {{ monitoring_namespace }} --timeout=120s
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      ignore_errors: yes
+      register: remaining_delete
+      changed_when: "'deleted' in remaining_delete.stdout"
+
+    - name: Delete ConfigMaps in monitoring namespace
+      shell: kubectl delete configmap --all -n {{ monitoring_namespace }} --timeout=60s
       environment:
         KUBECONFIG: "{{ kubeconfig_path }}"
       ignore_errors: yes
 
-    - name: Remove configuration directories
-      file:
-        path: "{{ item }}"
-        state: absent
-      loop:
-        - /etc/prometheus
-        - /etc/grafana
-
-    - name: Remove data directories
-      file:
-        path: "{{ item }}"
-        state: absent
-      loop:
-        - /var/lib/prometheus
-        - /var/lib/grafana
-        - /var/log/prometheus
-        - /var/log/grafana
-
-    - name: Remove users
-      user:
-        name: "{{ item }}"
-        state: absent
-        remove: yes
-      loop:
-        - prometheus
-        - node_exporter
-        - grafana
+    - name: Delete Secrets in monitoring namespace
+      shell: kubectl delete secret --all -n {{ monitoring_namespace }} --timeout=60s
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
       ignore_errors: yes
 
-    - name: Reload systemd
-      systemd:
-        daemon_reload: yes
+    # ==========================================
+    # Delete Namespace
+    # ==========================================
+    - name: Delete monitoring namespace
+      command: kubectl delete namespace {{ monitoring_namespace }} --timeout=120s
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      ignore_errors: yes
+      register: ns_delete
+      changed_when: "'deleted' in ns_delete.stdout"
 
-    - name: Display completion message
+    # ==========================================
+    # Handle Stuck Namespace (if finalizers block deletion)
+    # ==========================================
+    - name: Check if namespace is stuck in Terminating state
+      shell: kubectl get namespace {{ monitoring_namespace }} -o jsonpath='{.status.phase}' 2>/dev/null || echo "deleted"
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: ns_status
+      changed_when: false
+
+    - name: Force remove namespace finalizers if stuck
+      when: ns_status.stdout == "Terminating"
+      shell: |
+        kubectl get namespace {{ monitoring_namespace }} -o json | \
+          jq '.spec.finalizers = []' | \
+          kubectl replace --raw "/api/v1/namespaces/{{ monitoring_namespace }}/finalize" -f -
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      ignore_errors: yes
+
+    # ==========================================
+    # Clean Up Helm Repo (Optional)
+    # ==========================================
+    - name: Remove prometheus-community Helm repo
+      command: helm repo remove prometheus-community
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      ignore_errors: yes
+      register: repo_remove
+      changed_when: "'has been removed' in repo_remove.stdout"
+
+    # ==========================================
+    # Clean Up Local Files
+    # ==========================================
+    - name: Remove access info file from remote server
+      file:
+        path: /root/prometheus-grafana-access-info.txt
+        state: absent
+
+    - name: Remove access info from local machine
+      delegate_to: localhost
+      become: no
+      file:
+        path: ./rancher/prometheus-grafana-access-info.txt
+        state: absent
+
+    - name: Remove temporary values file if exists
+      file:
+        path: /tmp/kube-prometheus-stack-values.yml
+        state: absent
+
+    # ==========================================
+    # Verification
+    # ==========================================
+    - name: Verify namespace is deleted
+      shell: kubectl get namespace {{ monitoring_namespace }} 2>&1 || true
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: ns_verify
+      changed_when: false
+
+    - name: Verify CRDs are removed
+      shell: kubectl get crd 2>/dev/null | grep monitoring.coreos.com || echo "No monitoring CRDs found ✅"
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: crd_verify
+      changed_when: false
+
+    - name: Verify Helm release is removed
+      shell: helm list --all-namespaces 2>/dev/null | grep {{ helm_release_name }} || echo "No Helm release found ✅"
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: helm_verify
+      changed_when: false
+
+    # ==========================================
+    # Summary
+    # ==========================================
+    - name: Display uninstall summary
       debug:
-        msg: "✅ Prometheus & Grafana uninstalled successfully"
+        msg:
+          - ""
+          - "=========================================="
+          - "  ✅ Monitoring Stack Uninstalled!"
+          - "=========================================="
+          - ""
+          - "Namespace:    {{ ns_verify.stdout }}"
+          - "CRDs:         {{ crd_verify.stdout }}"
+          - "Helm Release: {{ helm_verify.stdout }}"
+          - ""
+          - "=========================================="
+          - "  Removed Components:"
+          - "=========================================="
+          - ""
+          - "  ✓ Prometheus (in-cluster pod)"
+          - "  ✓ Grafana (in-cluster pod)"
+          - "  ✓ Node Exporter (DaemonSet)"
+          - "  ✓ kube-state-metrics"
+          - "  ✓ Alertmanager"
+          - "  ✓ Prometheus Operator"
+          - "  ✓ All monitoring CRDs"
+          - "  ✓ All PVCs (metrics data)"
+          - "  ✓ All TLS secrets"
+          - "  ✓ Helm repo (prometheus-community)"
+          - "  ✓ Ingress resources"
+          - ""
+          - "=========================================="
+          - "  DNS Cleanup (manual):"
+          - "=========================================="
+          - ""
+          - "  Remove DNS records for:"
+          - "    - prometheus.bunlong.uk"
+          - "    - grafana.bunlong.uk"
+          - ""
+          - "=========================================="
 EOF
     
     # Create ArgoCD uninstall playbook
@@ -580,7 +788,7 @@ uninstall_prometheus() {
         return 1
     fi
     
-    create_uninstall_playbooks
+    # create_uninstall_playbooks
     
     print_warning "This will remove:"
     print_warning "  - Prometheus"
@@ -606,7 +814,7 @@ uninstall_argocd() {
         return 1
     fi
     
-    create_uninstall_playbooks
+    # create_uninstall_playbooks
     
     print_warning "This will remove:"
     print_warning "  - ArgoCD server"
@@ -631,7 +839,7 @@ uninstall_rancher() {
         return 1
     fi
     
-    create_uninstall_playbooks
+    # create_uninstall_playbooks
     
     print_warning "This will remove:"
     print_warning "  - Rancher server"
