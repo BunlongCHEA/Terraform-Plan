@@ -1,6 +1,22 @@
 # Rename this file to terraform.tfvars and fill in values
+# ===========================================
+# GCP Authentication — Uncomment ONE option only
+# ===========================================
 
-gke_service_account_b64 = "<base64-encoded service account JSON>"
+# OPTION 1 — Base64-encoded service account JSON
+# How to generate (WSL/Linux):
+#   base64 -w 0 < /path/to/your-key.json
+# How to generate (Windows PowerShell):
+#   [Convert]::ToBase64String([IO.File]::ReadAllBytes("C:\path\to\key.json"))
+gke_service_account_b64 = ""
+
+# OPTION 2 — Path to service account JSON file on disk
+# Linux / WSL path example:
+#   gke_credentials_file = "/home/ubuntu/.gcp/my-project-key.json"
+# Windows path (running from WSL):
+#   gke_credentials_file = "/mnt/d/keys/my-project-key.json"
+## gke_credentials_file = "/home/ubuntu/.gcp/my-project-key.json"
+
 gcp_project_id          = "<your-gcp-project-id>"
 region                  = "asia-southeast1"
 zone                    = "asia-southeast1-a"

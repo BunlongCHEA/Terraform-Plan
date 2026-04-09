@@ -1,4 +1,5 @@
-# Requiement
+# I. How to install Terraform before Run: Depend Operating-System
+## Requiement
 - Ansible
 - Terraform
 - kubernetes.core
@@ -10,8 +11,8 @@
 | `Permissions` | Zone - Zone - Read |
 | `Zone Resources` | Include - Specific zone - dns.site |
 
-# STEP 1 -- Install Terraform
-## On Window
+## Install Terraform
+### On Window
 
 Go to Terraform official webiste -- https://developer.hashicorp.com/terraform/tutorials/gcp-get-started/install-cli
 
@@ -29,7 +30,7 @@ terraform version
 terraform -help
 ```
 
-## On Linux
+### On Linux
 
 **Update your system and install necessary packages**
 
@@ -69,14 +70,19 @@ terraform --version
 ```
 You should see an output similar to Terraform v1.X.X on linux_amd64 (the exact version will vary). 
 
-# STEP 2 -- Terraform: Run to Create Droplet on Ubuntu
+---
+
+# II. Terraform: Run 
+## Ubuntu: Create Droplet
+
+Choose Directory for different Cloud-Provider
 
 ** Requirement:
 
-Ensure to DigitalOcean API Token with Create/Delete Permission
+Ensure Cloud-Provider API Token have **Create/Delete** Permission
 - Rename terraform.tfvars.example => terraform.tfvars
 - Copy and Fill in each values for terraform.tfvars like do_token, region, etc...
-- Then run below to create Droplets
+- Then run below to create VM
 
 ```bash
 cd ./digitalocean
@@ -108,7 +114,9 @@ Or SSH
 ssh -i ~/.ssh/id_rsa_digitalocean root@139.59.229.28
 ```
 
-# STEP 3 -- (Optional) Require to Remove & Change Permission to Private Key
+---
+
+# III. (Optional) Require to Remove & Change Permission to Private Key
 ## If Window
 
 Using Windows GUI --
@@ -145,6 +153,8 @@ ls -la ~/.ssh/
 # Test SSH
 ssh -i ~/.ssh/id_rsa_digitalocean root@174.138.21.129
 ```
+
+---
 
 # OTHER: Clean-Up Any Partial Resources (if needed)
 

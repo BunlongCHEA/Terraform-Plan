@@ -1,7 +1,28 @@
+# variable "gke_service_account_b64" {
+#   description = "Base64-encoded GCP service account JSON key"
+#   type        = string
+#   sensitive   = true
+# }
 variable "gke_service_account_b64" {
-  description = "Base64-encoded GCP service account JSON key"
-  type        = string
-  sensitive   = true
+  description = <<-EOT
+    OPTION 1 — Base64-encoded GCP service account JSON.
+    Generate: base64 -w 0 < your-key.json
+    Leave as "" if using gke_credentials_file instead.
+  EOT
+  type      = string
+  sensitive = true
+  default   = ""
+}
+
+variable "gke_credentials_file" {
+  description = <<-EOT
+    OPTION 2 — Absolute path to GCP service account JSON file on disk.
+    Linux/WSL example : /home/ubuntu/.gcp/my-project-key.json
+    Windows WSL example: /mnt/d/keys/my-project-key.json
+    Leave as "" if using gke_service_account_b64 instead.
+  EOT
+  type    = string
+  default = ""
 }
 
 variable "gcp_project_id" {
