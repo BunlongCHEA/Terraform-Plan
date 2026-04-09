@@ -1,0 +1,648 @@
+---
+- name: Deploy ArgoCD on Rancher/K3s Cluster (Fresh Start)
+  hosts: os_servers
+  become: yes
+  gather_facts: yes
+  vars: 
+    argocd_namespace: argocd
+    kubeconfig_path: /etc/rancher/k3s/k3s.yaml
+    patches_dir: /opt/argocd-patches
+    argocd_config_dir: "./argocd"
+    
+    # Master node (first host in inventory)
+    first_master:  "{{ groups['os_servers'][0] }}"
+    is_single_node: "{{ groups['os_servers'] | length == 1 }}"
+  
+  tasks:
+    # ==========================================
+    # Pre-flight Check
+    # ==========================================
+    - name: Verify K3s and kubectl are available
+      command: kubectl version --client
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: kubectl_version
+      changed_when: false
+      when: inventory_hostname == first_master
+
+    - name: Display K3s/kubectl version
+      debug:
+        msg: "{{ kubectl_version.stdout_lines }}"
+      when: inventory_hostname == first_master
+
+    - name: Check cluster health
+      command: kubectl get nodes -o wide
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: cluster_nodes
+      changed_when: false
+      when: inventory_hostname == first_master
+
+    - name: Display cluster nodes
+      debug:
+        var: cluster_nodes.stdout_lines
+      when: inventory_hostname == first_master
+
+    # ==========================================
+    # Setup Directories
+    # ==========================================
+    - name: Create patches directory
+      file:
+        path: "{{ patches_dir }}"
+        state: directory
+        mode: '0755'
+      when: inventory_hostname == first_master or is_single_node
+
+    - name: Create temp manifests directory
+      file:
+        path: /tmp/argocd-manifests
+        state: directory
+        mode: '0755'
+      when: inventory_hostname == first_master or is_single_node
+
+    # ==========================================
+    # STEP 1: Create ArgoCD Namespace
+    # ==========================================
+    - name: Check if ArgoCD namespace exists
+      command: kubectl get namespace {{ argocd_namespace }}
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: argocd_ns_check
+      failed_when: false
+      changed_when: false
+      when: inventory_hostname == first_master or is_single_node
+
+    - name: Create ArgoCD namespace
+      command: kubectl create namespace {{ argocd_namespace }}
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      when: 
+        - (inventory_hostname == first_master or is_single_node)
+        - argocd_ns_check.rc != 0
+
+    - name: Verify ArgoCD namespace created
+      command: kubectl get namespace {{ argocd_namespace }}
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: argocd_ns_verify
+      changed_when: false
+      when: inventory_hostname == first_master or is_single_node
+
+    # ==========================================
+    # STEP 2: Download and Install ArgoCD Manifests
+    # ==========================================
+    - name: Download ArgoCD install manifest
+      get_url:
+        url: https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
+        dest: /tmp/argocd-manifests/install.yaml
+        mode: '0644'
+      when: inventory_hostname == first_master or is_single_node
+
+    - name: Apply ArgoCD manifests using kubectl create (first time)
+      shell: |
+        export KUBECONFIG={{ kubeconfig_path }}
+        
+        # Check if ArgoCD is already installed
+        if kubectl get deployment argocd-server -n {{ argocd_namespace }} &>/dev/null; then
+          echo "ArgoCD already installed, using apply"
+          kubectl apply -n {{ argocd_namespace }} -f /tmp/argocd-manifests/install.yaml
+        else
+          echo "Fresh installation, using create"
+          kubectl create -n {{ argocd_namespace }} -f /tmp/argocd-manifests/install.yaml
+        fi
+      args:
+        executable: /bin/bash
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: argocd_install
+      changed_when: "'created' in argocd_install.stdout or 'configured' in argocd_install.stdout"
+      when: inventory_hostname == first_master or is_single_node
+
+    - name: Display installation output
+      debug:
+        var: argocd_install.stdout_lines
+      when: inventory_hostname == first_master or is_single_node
+
+    # ==========================================
+    # STEP 3: Wait for CRDs to be Established
+    # ==========================================
+    - name: Wait for ArgoCD CRDs to be established
+      shell: |
+        export KUBECONFIG={{ kubeconfig_path }}
+        
+        echo "Waiting for CRDs to be established..."
+        kubectl wait --for condition=established \
+          crd/applications.argoproj.io \
+          crd/applicationsets.argoproj.io \
+          crd/appprojects.argoproj.io \
+          --timeout=120s
+        
+        echo "All CRDs established"
+      args:
+        executable: /bin/bash
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: crd_wait
+      retries: 3
+      delay: 10
+      until: crd_wait.rc == 0
+      when: inventory_hostname == first_master or is_single_node
+
+    # ==========================================
+    # STEP 4: Wait for ArgoCD Deployments to be Created
+    # ==========================================
+    - name: Wait for ArgoCD deployments to be created
+      shell: |
+        export KUBECONFIG={{ kubeconfig_path }}
+        
+        echo "Waiting for deployments to be created..."
+        for i in {1..30}; do
+          if kubectl get deployment argocd-server -n {{ argocd_namespace }} &>/dev/null; then
+            echo "Deployments created"
+            exit 0
+          fi
+          echo "Attempt $i: Waiting for deployments..."
+          sleep 5
+        done
+        
+        echo "Timeout waiting for deployments"
+        exit 1
+      args:
+        executable: /bin/bash
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: deployment_wait
+      when: inventory_hostname == first_master or is_single_node
+
+    # ==========================================
+    # STEP 5: Wait for Initial Pods to Start
+    # ==========================================
+    - name: Wait for ArgoCD pods to start (initial)
+      shell: |
+        export KUBECONFIG={{ kubeconfig_path }}
+        
+        echo "Waiting for pods to start..."
+        kubectl wait --for=condition=ready pod \
+          -l app.kubernetes.io/part-of=argocd \
+          -n {{ argocd_namespace }} \
+          --timeout=300s || true
+        
+        echo "Pod startup check complete"
+      args:
+        executable: /bin/bash
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: pods_initial
+      when: inventory_hostname == first_master or is_single_node
+
+    - name: Get initial ArgoCD pod status
+      command: kubectl get pods -n {{ argocd_namespace }} -o wide
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: argocd_pods_initial
+      changed_when: false
+      when: inventory_hostname == first_master or is_single_node
+
+    - name: Display initial pod status
+      debug:
+        var: argocd_pods_initial.stdout_lines
+      when: inventory_hostname == first_master or is_single_node
+
+    # ==========================================
+    # STEP 6: Verify ArgoCD Secret is Created
+    # ==========================================
+    - name: Check for ArgoCD initial admin secret
+      shell: |
+        export KUBECONFIG={{ kubeconfig_path }}
+        
+        # Wait for initial admin secret
+        for i in {1..30}; do
+          if kubectl get secret argocd-initial-admin-secret -n {{ argocd_namespace }} &>/dev/null; then
+            echo "Admin secret found"
+            exit 0
+          fi
+          echo "Attempt $i: Waiting for admin secret..."
+          sleep 5
+        done
+        
+        echo "Admin secret not found (will be generated)"
+        exit 0
+      args:
+        executable: /bin/bash
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: secret_check
+      when: inventory_hostname == first_master or is_single_node
+
+    # ==========================================
+    # STEP 7: Copy and Apply Resource Patches
+    # ==========================================
+    - name: Copy patch files to remote
+      copy:
+        src: "{{ item }}"
+        dest: "{{ patches_dir }}/{{ item | basename }}"
+        mode: '0644'
+      loop: 
+        - argocd/argocd-server.json
+        - argocd/argocd-repo-server.json
+        - argocd/argocd-application-controller.json
+        - argocd/argocd-redis.json
+        - argocd/argocd-dex-server.json
+      when: inventory_hostname == first_master or is_single_node
+
+    - name: Apply argocd-server resource patch
+      command: >
+        kubectl patch deployment argocd-server
+        -n {{ argocd_namespace }}
+        --type=strategic
+        --patch-file={{ patches_dir }}/argocd-server.json
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: patch_server
+      changed_when: "'patched' in patch_server.stdout or 'patched' in patch_server.stderr"
+      when: inventory_hostname == first_master or is_single_node
+
+    - name: Apply argocd-repo-server resource patch
+      command: >
+        kubectl patch deployment argocd-repo-server
+        -n {{ argocd_namespace }}
+        --type=strategic
+        --patch-file={{ patches_dir }}/argocd-repo-server.json
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: patch_repo
+      changed_when: "'patched' in patch_repo.stdout or 'patched' in patch_repo.stderr"
+      when: inventory_hostname == first_master or is_single_node
+
+    - name: Apply argocd-application-controller resource patch
+      command: >
+        kubectl patch statefulset argocd-application-controller
+        -n {{ argocd_namespace }}
+        --type=strategic
+        --patch-file={{ patches_dir }}/argocd-application-controller.json
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: patch_controller
+      changed_when: "'patched' in patch_controller.stdout or 'patched' in patch_controller.stderr"
+      when: inventory_hostname == first_master or is_single_node
+
+    - name: Apply argocd-redis resource patch
+      command: >
+        kubectl patch deployment argocd-redis
+        -n {{ argocd_namespace }}
+        --type=strategic
+        --patch-file={{ patches_dir }}/argocd-redis.json
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: patch_redis
+      changed_when: "'patched' in patch_redis.stdout or 'patched' in patch_redis.stderr"
+      when: inventory_hostname == first_master or is_single_node
+
+    - name: Apply argocd-dex-server resource patch
+      command: >
+        kubectl patch deployment argocd-dex-server
+        -n {{ argocd_namespace }}
+        --type=strategic
+        --patch-file={{ patches_dir }}/argocd-dex-server.json
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: patch_dex
+      changed_when: "'patched' in patch_dex.stdout or 'patched' in patch_dex.stderr"
+      when: inventory_hostname == first_master or is_single_node
+
+    - name: Display patch results
+      debug:
+        msg:
+          - "Server patch: {{ 'Applied' if patch_server.changed else 'No change' }}"
+          - "Repo patch: {{ 'Applied' if patch_repo.changed else 'No change' }}"
+          - "Controller patch: {{ 'Applied' if patch_controller.changed else 'No change' }}"
+          - "Redis patch: {{ 'Applied' if patch_redis.changed else 'No change' }}"
+          - "Dex patch: {{ 'Applied' if patch_dex.changed else 'No change' }}"
+      when: inventory_hostname == first_master or is_single_node
+
+    # ==========================================
+    # STEP 8: Wait for Pods to Stabilize After Patching
+    # ==========================================
+    - name: Wait for deployments to rollout after patching
+      shell: |
+        export KUBECONFIG={{ kubeconfig_path }}
+        
+        echo "Waiting for rollout to complete..."
+        kubectl rollout status deployment/argocd-server -n {{ argocd_namespace }} --timeout=180s
+        kubectl rollout status deployment/argocd-repo-server -n {{ argocd_namespace }} --timeout=180s
+        kubectl rollout status deployment/argocd-redis -n {{ argocd_namespace }} --timeout=180s
+        kubectl rollout status deployment/argocd-dex-server -n {{ argocd_namespace }} --timeout=180s
+        kubectl rollout status statefulset/argocd-application-controller -n {{ argocd_namespace }} --timeout=180s
+        
+        echo "All rollouts complete"
+      args:
+        executable: /bin/bash
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: rollout_status
+      when: inventory_hostname == first_master or is_single_node
+
+    # - name: Wait for all pods to be ready after patching
+    #   shell: |
+    #     export KUBECONFIG={{ kubeconfig_path }}
+        
+    #     kubectl wait --for=condition=ready pod \
+    #       -l app.kubernetes.io/part-of=argocd \
+    #       -n {{ argocd_namespace }} \
+    #       --timeout=300s
+    #   args:
+    #     executable: /bin/bash
+    #   environment:
+    #     KUBECONFIG: "{{ kubeconfig_path }}"
+    #   register: pods_ready_final
+    #   retries: 3
+    #   delay: 20
+    #   until: pods_ready_final.rc == 0
+    #   when: inventory_hostname == first_master or is_single_node
+    #   ignore_errors: yes
+
+    # ==========================================
+    # STEP 9: Configure ArgoCD for Ingress
+    # ==========================================
+    - name: Set ArgoCD server to insecure mode (for ingress)
+      command: >
+        kubectl patch configmap argocd-cmd-params-cm -n {{ argocd_namespace }}
+        --type merge -p '{"data":{"server.insecure":"true"}}'
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: insecure_patch
+      changed_when: "'patched' in insecure_patch.stdout or 'configured' in insecure_patch.stdout"
+      when: inventory_hostname == first_master or is_single_node
+
+    - name: Restart argocd-server for insecure mode
+      command: kubectl rollout restart deployment argocd-server -n {{ argocd_namespace }}
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      when: 
+        - inventory_hostname == first_master or is_single_node
+        - insecure_patch.changed
+
+    - name: Wait for argocd-server restart
+      command: kubectl rollout status deployment argocd-server -n {{ argocd_namespace }} --timeout=180s
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      when: 
+        - inventory_hostname == first_master or is_single_node
+        - insecure_patch.changed
+      ignore_errors: yes
+
+    # ==========================================
+    # STEP 10: Apply ArgoCD Ingress
+    # ==========================================
+    - name: Create ArgoCD ingress manifests directory
+      file:
+        path: /tmp/argocd-ingress
+        state: directory
+        mode: '0755'
+      when: inventory_hostname == first_master or is_single_node
+
+    - name: Copy ArgoCD ingress template to remote
+      template:
+        src: "{{ argocd_config_dir }}/argocd_ingress.yml.j2"
+        dest: /tmp/argocd-ingress/argocd-ingress.yml
+        mode: '0644'
+      when: inventory_hostname == first_master or is_single_node
+
+    - name: Apply ArgoCD Ingress
+      command: kubectl apply -f /tmp/argocd-ingress/argocd-ingress.yml
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: argocd_ingress_apply
+      changed_when: "'created' in argocd_ingress_apply.stdout or 'configured' in argocd_ingress_apply.stdout"
+      when: inventory_hostname == first_master or is_single_node
+
+    - name: Wait for ingress to be created
+      pause:
+        seconds: 10
+      when: inventory_hostname == first_master or is_single_node
+
+    - name: Get ArgoCD Ingress status
+      command: kubectl get ingress argocd-server-ingress -n {{ argocd_namespace }} -o wide
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: argocd_ingress_status
+      changed_when: false
+      when: inventory_hostname == first_master or is_single_node
+
+    - name: Display ArgoCD Ingress details
+      debug:
+        var: argocd_ingress_status.stdout_lines
+      when: inventory_hostname == first_master or is_single_node
+
+    # ==========================================
+    # STEP 11: Get Access Information
+    # ==========================================
+    - name: Get ArgoCD admin password
+      shell: |
+        export KUBECONFIG={{ kubeconfig_path }}
+        kubectl -n {{ argocd_namespace }} get secret argocd-initial-admin-secret -o jsonpath="{.data.password}" 2>/dev/null | base64 -d || echo "Password not yet generated"
+      args:
+        executable: /bin/bash
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: argocd_password
+      changed_when: false
+      when: inventory_hostname == first_master or is_single_node
+
+    - name: Get final pod status
+      command: kubectl get pods -n {{ argocd_namespace }} -o wide
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: final_pods_status
+      changed_when: false
+      when: inventory_hostname == first_master or is_single_node
+
+    - name: Get ArgoCD services
+      command: kubectl get svc -n {{ argocd_namespace }}
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: argocd_services
+      changed_when: false
+      when: inventory_hostname == first_master or is_single_node
+
+    - name: Get server IP address
+      set_fact:
+        server_ip: "{{ ansible_default_ipv4.address }}"
+      when: inventory_hostname == first_master or is_single_node
+
+    # ==========================================
+    # STEP 12: Display Installation Summary
+    # ==========================================
+    - name: Display ArgoCD Installation Summary
+      debug:
+        msg: 
+          - ""
+          - "=========================================="
+          - "  ✅ ArgoCD Installation Complete!"
+          - "=========================================="
+          - ""
+          - "📍 Namespace: {{ argocd_namespace }}"
+          - "🌐 Server IP: {{ server_ip }}"
+          - ""
+          - "🔑 Admin Credentials:"
+          - "  Username: admin"
+          - "  Password: {{ argocd_password.stdout }}"
+          - ""
+          - "📋 Pod Status:"
+          - "{{ final_pods_status.stdout_lines | join('\n') }}"
+          - ""
+          - "🌐 Services:"
+          - "{{ argocd_services.stdout_lines | join('\n') }}"
+          - ""
+          - "=========================================="
+          - "  Access ArgoCD:"
+          - "=========================================="
+          - ""
+          - "🌍 Option 1: HTTPS Ingress (Recommended)"
+          - "  URL: https://{{ argocd_domain }}"
+          - "  NOTE: Configure DNS to point {{ argocd_domain }} to {{ server_ip }}"
+          - "  TLS: Automatic (Let's Encrypt via cert-manager)"
+          - ""
+          - "🔧 Option 2: Port Forward (Quick Test)"
+          - "  kubectl port-forward svc/argocd-server -n {{ argocd_namespace }} 8080:80"
+          - "  URL: http://localhost:8080"
+          - ""
+          - "🖥️ Option 3: Direct Access (NodePort/LoadBalancer)"
+          - "  http://{{ server_ip }}:30080 (if NodePort configured)"
+          - ""
+          - "=========================================="
+          - "  Next Steps:"
+          - "=========================================="
+          - ""
+          - "1. Configure DNS: {{ argocd_domain }} → {{ server_ip }}"
+          - "2. Access: https://{{ argocd_domain }}"
+          - "3. Login with admin/{{ argocd_password.stdout }}"
+          - "4. Change password (User Info → Update Password)"
+          - "5. Add Git repositories (Settings → Repositories)"
+          - "6. Create applications (Applications → New App)"
+          - ""
+          - "=========================================="
+          - "  Useful Commands:"
+          - "=========================================="
+          - ""
+          - "# Get password again"
+          - "kubectl -n {{ argocd_namespace }} get secret argocd-initial-admin-secret -o jsonpath='{.data.password}' | base64 -d"
+          - ""
+          - "# Check pods"
+          - "kubectl get pods -n {{ argocd_namespace }}"
+          - ""
+          - "# Check ingress"
+          - "kubectl get ingress -n {{ argocd_namespace }}"
+          - ""
+          - "# View logs"
+          - "kubectl logs -n {{ argocd_namespace }} -l app.kubernetes.io/name=argocd-server"
+          - ""
+          - "# Port forward"
+          - "kubectl port-forward svc/argocd-server -n {{ argocd_namespace }} 8080:80"
+          - ""
+          - "=========================================="
+          - ""
+      when: inventory_hostname == first_master or is_single_node
+
+    - name: Set access info content
+      set_fact:
+        argocd_access_info: |
+          ==========================================
+            ✅ ArgoCD Installation Complete!
+          ==========================================
+          
+          📍 Namespace: {{ argocd_namespace }}
+          🌐 Server IP: {{ server_ip }}
+          
+          🔑 Admin Credentials:
+            Username: admin
+            Password: {{ argocd_password.stdout }}
+          
+          📋 Pod Status:
+          {{ final_pods_status.stdout_lines | join('\n') }}
+          
+          🌐 Services:
+          {{ argocd_services.stdout_lines | join('\n') }}
+          
+          ==========================================
+            Access ArgoCD:
+          ==========================================
+          
+          🌍 Option 1: HTTPS Ingress (Recommended)
+            URL: https://{{ argocd_domain }}
+            NOTE: Configure DNS to point {{ argocd_domain }} to {{ server_ip }}
+            TLS: Automatic (Let's Encrypt via cert-manager)
+          
+          🔧 Option 2: Port Forward (Quick Test)
+            kubectl port-forward svc/argocd-server -n {{ argocd_namespace }} 8080:80
+            URL: http://localhost:8080
+          
+          🖥️ Option 3: Direct Access (NodePort/LoadBalancer)
+            http://{{ server_ip }}:30080 (if NodePort configured)
+          
+          ==========================================
+            Next Steps:
+          ==========================================
+          
+          1. Configure DNS: {{ argocd_domain }} → {{ server_ip }}
+          2. Access: https://{{ argocd_domain }}
+          3. Login with admin/{{ argocd_password.stdout }}
+          4. Change password (User Info → Update Password)
+          5. Add Git repositories (Settings → Repositories)
+          6. Create applications (Applications → New App)
+
+          ==========================================
+          Useful Commands:
+          ==========================================
+
+          # Get password again
+          kubectl -n {{ argocd_namespace }} get secret argocd-initial-admin-secret -o jsonpath='{.data.password}' | base64 -d
+
+          # Check pods
+          kubectl get pods -n {{ argocd_namespace }}
+
+          # Check ingress
+          kubectl get ingress -n {{ argocd_namespace }}
+
+          # View logs
+          kubectl logs -n {{ argocd_namespace }} -l app.kubernetes.io/name=argocd-server
+
+          # Port forward
+          kubectl port-forward svc/argocd-server -n {{ argocd_namespace }} 8080:80
+
+          # List All certificates in all namespaces
+          kubectl get certificates --all-namespaces
+
+          # Delete the old certificate secret
+          kubectl delete secret kyc-blockchain-tls -n kyc-blockchain
+
+          # Verify it's deleted
+          kubectl get secret kyc-blockchain-tls -n kyc-blockchain
+
+      when: inventory_hostname == first_master or is_single_node
+
+    - name: Save access information to remote server
+      copy:
+        dest: /root/argocd-access-info.txt
+        content: "{{ argocd_access_info }}"
+        mode: "0600"
+
+    - name: Save access information to local machine
+      delegate_to: localhost
+      become: no
+      copy:
+        dest: ./rancher/argocd-access-info.txt
+        content: "{{ argocd_access_info }}"
+        mode: "0644"
+
+    # ==========================================
+    # Cleanup
+    # ==========================================
+    - name: Remove temporary directories
+      file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /tmp/argocd-manifests
+        - /tmp/argocd-ingress
+      when: inventory_hostname == first_master or is_single_node

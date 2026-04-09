@@ -1,0 +1,83 @@
+---
+- name: Uninstall ArgoCD from Kubernetes
+  hosts: os_servers
+  become: yes
+  gather_facts: yes
+  vars:
+    argocd_namespace: argocd
+    kubeconfig_path: /etc/rancher/k3s/k3s.yaml
+    first_master: "{{ groups['os_servers'][0] }}"
+    is_single_node: "{{ groups['os_servers'] | length == 1 }}"
+  
+  tasks:
+    - name: Check if ArgoCD namespace exists
+      command: kubectl get namespace {{ argocd_namespace }}
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: ns_check
+      failed_when: false
+      changed_when: false
+      when: inventory_hostname == first_master or is_single_node
+
+    - name: Delete ArgoCD applications
+      shell: kubectl delete applications --all -n {{ argocd_namespace }} --timeout=60s
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      when: 
+        - (inventory_hostname == first_master or is_single_node)
+        - ns_check.rc == 0
+      ignore_errors: yes
+
+    - name: Delete ArgoCD namespace
+      command: kubectl delete namespace {{ argocd_namespace }} --timeout=120s
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      when: 
+        - (inventory_hostname == first_master or is_single_node)
+        - ns_check.rc == 0
+      ignore_errors: yes
+
+    - name: Delete ArgoCD CRDs
+      shell: |
+        kubectl delete crd applications.argoproj.io 2>/dev/null || true
+        kubectl delete crd applicationsets.argoproj.io 2>/dev/null || true
+        kubectl delete crd appprojects.argoproj.io 2>/dev/null || true
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      when: inventory_hostname == first_master or is_single_node
+      ignore_errors: yes
+
+    - name: Delete ArgoCD ClusterRoles
+      shell: |
+        kubectl delete clusterrole argocd-application-controller 2>/dev/null || true
+        kubectl delete clusterrole argocd-server 2>/dev/null || true
+        kubectl delete clusterrole argocd-applicationset-controller 2>/dev/null || true
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      when: inventory_hostname == first_master or is_single_node
+      ignore_errors: yes
+
+    - name: Delete ArgoCD ClusterRoleBindings
+      shell: |
+        kubectl delete clusterrolebinding argocd-application-controller 2>/dev/null || true
+        kubectl delete clusterrolebinding argocd-server 2>/dev/null || true
+        kubectl delete clusterrolebinding argocd-applicationset-controller 2>/dev/null || true
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      when: inventory_hostname == first_master or is_single_node
+      ignore_errors: yes
+
+    - name: Remove local ArgoCD files
+      file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /opt/argocd-patches
+        - /tmp/argocd-manifests
+        - /tmp/argocd-ingress
+      when: inventory_hostname == first_master or is_single_node
+
+    - name: Display completion message
+      debug:
+        msg: "✅ ArgoCD uninstalled successfully"
+      when: inventory_hostname == first_master or is_single_node

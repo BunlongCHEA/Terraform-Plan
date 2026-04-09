@@ -21,7 +21,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
 # SSH key path (always in ~/.ssh)
-SSH_PRIVATE_KEY="$HOME/.ssh/id_rsa_digitalocean"
+SSH_PRIVATE_KEY="$HOME/.ssh/id_rsa_gke"
 
 # Inventory and playbook paths
 INVENTORY="$SCRIPT_DIR/output/inventory.ini"
@@ -82,39 +82,22 @@ create_directories() {
     print_success "Created: argocd/"
 }
 
-# Set DigitalOcean token
-set_do_token() {
-    print_header "Setting DigitalOcean Token"
-    
-    # Check if token is already set via environment variable
-    if [ -n "$TF_VAR_do_token" ]; then
-        print_success "DigitalOcean token already set via environment variable"
+# Decode base64 service account from terraform.tfvars if GOOGLE_CREDENTIALS not set
+set_gcp_credentials() {
+    print_header "Setting GCP Credentials"
+
+    if [ -n "$GOOGLE_CREDENTIALS" ]; then
+        print_success "GCP credentials already set via GOOGLE_CREDENTIALS env var"
         return 0
     fi
-    
-    # Check if terraform.tfvars exists and contains do_token
-    if [ -f "terraform.tfvars" ]; then
-        if grep -q "do_token" terraform.tfvars; then
-            print_success "DigitalOcean token found in terraform.tfvars"
-            return 0
-        fi
+
+    if [ -f "terraform.tfvars" ] && grep -q "gke_service_account_b64" terraform.tfvars; then
+        print_success "GCP credentials found in terraform.tfvars (used by provider directly)"
+        return 0
     fi
-    
-    # Prompt for token if not found
-    print_warning "DigitalOcean token not found!"
-    echo ""
-    echo "Options:"
-    echo "  1. Set environment variable: export TF_VAR_do_token='your_token'"
-    echo "  2. Add to terraform.tfvars: do_token = \"your_token\""
-    echo ""
-    read -p "Enter DigitalOcean API token (or press Enter to skip): " token
-    
-    if [ -n "$token" ]; then
-        export TF_VAR_do_token="$token"
-        print_success "Token set for this session"
-    else
-        print_warning "No token provided. Make sure terraform.tfvars contains do_token"
-    fi
+
+    print_warning "terraform.tfvars not found or missing gke_service_account_b64"
+    print_info "Copy terraform.tfvars.example → terraform.tfvars and fill in values"
 }
 
 # Initialize Terraform
@@ -990,7 +973,7 @@ case "${1:-}" in
         ;;
     init)
         create_directories
-        set_do_token
+        set_gcp_credentials
         terraform_init
         ;;
     validate)
@@ -1000,7 +983,7 @@ case "${1:-}" in
         terraform_plan
         ;;
     apply)
-        set_do_token
+        set_gcp_credentials
         terraform_apply
         terraform_output
         ;;

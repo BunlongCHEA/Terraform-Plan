@@ -1,0 +1,6 @@
+---
+# Cloudflare Configuration
+#cloudflare_api_token : "<Replace with Cloudflare API Token>"
+#cloudflare_email     : "<your-email@gmail.com>"
+rancher_domain       : "<domain.example.com>"
+admin_email          : "<admin@example.com>"

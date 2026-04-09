@@ -1,0 +1,14 @@
+# Rename this file to terraform.tfvars and fill in values
+
+gke_service_account_b64 = "<base64-encoded service account JSON>"
+gcp_project_id          = "<your-gcp-project-id>"
+region                  = "asia-southeast1"
+zone                    = "asia-southeast1-a"
+vm_os                   = "ubuntu-2404-lts-amd64"
+vm_os_project           = "ubuntu-os-cloud"
+machine_type            = "e2-medium"
+vm_count                = 1
+ssh_key_name            = "terraform-ansible-key"
+ssh_path                = "/home/ubuntu/.ssh"
+ssh_user                = "ubuntu"
+project_name            = "ansible-lab"

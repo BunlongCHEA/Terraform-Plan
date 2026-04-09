@@ -1,0 +1,32 @@
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: rancher-ingress
+  namespace: cattle-system
+  annotations:
+    # Traefik ingress controller
+    kubernetes.io/ingress.class: "traefik"
+    # Let's Encrypt certificate issuer
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+    # Traefik annotations
+    traefik.ingress.kubernetes.io/router.entrypoints: web,websecure
+    traefik.ingress.kubernetes.io/router.tls: "true"
+    # Redirect HTTP to HTTPS
+    # traefik.ingress.kubernetes.io/router.middlewares: default-redirect-https@kubernetescrd
+spec:
+  tls:
+    - hosts:
+        - "{{ rancher_domain }}"
+      secretName: rancher-tls-secret
+  rules:
+    - host: "{{ rancher_domain }}"
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend: 
+              service:
+                name: rancher
+                port:
+                  number:  80

@@ -1,0 +1,31 @@
+# GKE VM Deployment Summary
+
+**Generated:** ${timestamp}
+**Provider:**  Google Cloud Platform
+
+## VM Instances Created
+
+| Name | IP Address | Zone | Machine Type |
+|------|------------|------|--------------|
+%{ for server in servers ~}
+| ${server.name} | ${server.network_interface[0].access_config[0].nat_ip} | ${server.zone} | ${server.machine_type} |
+%{ endfor ~}
+
+## Software Installed
+
+- ✅ Python 3
+- ✅ pip3
+- ✅ Ansible
+
+## SSH Access
+
+**Private Key Location:** `${ssh_key_path}`
+**SSH User:** `${ssh_user}`
+
+### Connection Commands
+
+%{ for server in servers ~}
+```bash
+ssh -i "${ssh_key_path}" ${ssh_user}@${server.network_interface[0].access_config[0].nat_ip}
+```
+%{ endfor ~}

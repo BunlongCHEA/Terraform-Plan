@@ -1,4 +1,5 @@
 /digitalocean/terraform.tfvars
+/digitalocean/terraform.tfvars.bkp
 /digitalocean/terraform.tfstat*
 /digitalocean/.terraform.lock.hcl
 /digitalocean/.terraform/*
@@ -9,3 +10,13 @@
 /digitalocean/group_vars/all.yml
 test-kubeconfig.yaml
 kubeconfig-base64.txt
+/gke/terraform.tfvars
+/gke/terraform.tfvars.bkp
+/gke/terraform.tfstat*
+/gke/.terraform.lock.hcl
+/gke/.terraform/*
+/gke/ssh_keys/*
+/gke/output/*
+/gke/rancher/*
+/gke/run_ansible.bat
+/gke/group_vars/all.yml
