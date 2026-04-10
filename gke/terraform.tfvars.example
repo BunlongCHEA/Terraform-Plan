@@ -25,6 +25,6 @@ vm_os_project           = "ubuntu-os-cloud"
 machine_type            = "e2-medium"
 vm_count                = 1
 ssh_key_name            = "terraform-ansible-key"
-ssh_path                = "/home/ubuntu/.ssh"
+ssh_path                = "~/.ssh"
 ssh_user                = "ubuntu"
 project_name            = "ansible-lab"

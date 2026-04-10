@@ -23,6 +23,21 @@ variable "gke_credentials_file" {
   EOT
   type    = string
   default = ""
+
+  # Validation runs at plan time — no sensitive value referenced
+  validation {
+    condition = !(
+      var.gke_credentials_file == "" && var.gke_service_account_b64 == ""
+    )
+    error_message = "GCP auth error: set gke_service_account_b64 (Option 1) OR gke_credentials_file (Option 2). Both are currently empty."
+  }
+
+  validation {
+    condition = !(
+      var.gke_credentials_file != "" && var.gke_service_account_b64 != ""
+    )
+    error_message = "GCP auth error: set only ONE of gke_service_account_b64 OR gke_credentials_file — not both at the same time."
+  }
 }
 
 variable "gcp_project_id" {

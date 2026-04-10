@@ -42,23 +42,23 @@ locals {
 
 # Validation: exactly one option must be provided
 # Terraform will fail at plan time with a clear message if violated
-resource "terraform_data" "auth_validation" {
-  lifecycle {
-    precondition {
-      condition = (
-        (local.use_b64 || local.use_file) &&   # at least one is set
-        !(local.use_b64 && local.use_file)      # but not both at the same time
-      )
-      error_message = <<-EOT
-        GCP Authentication Error:
-        You must set exactly ONE of:
-          - gke_service_account_b64  (base64-encoded JSON string)
-          - gke_credentials_file     (path to JSON file on disk)
-        Currently: b64="${local.use_b64}" file="${local.use_file}"
-      EOT
-    }
-  }
-}
+# resource "terraform_data" "auth_validation" {
+#   lifecycle {
+#     precondition {
+#       condition = (
+#         (local.use_b64 || local.use_file) &&   # at least one is set
+#         !(local.use_b64 && local.use_file)      # but not both at the same time
+#       )
+#       error_message = <<-EOT
+#         GCP Authentication Error:
+#         You must set exactly ONE of:
+#           - gke_service_account_b64  (base64-encoded JSON string)
+#           - gke_credentials_file     (path to JSON file on disk)
+#         Currently: b64="${local.use_b64}" file="${local.use_file}"
+#       EOT
+#     }
+#   }
+# }
 
 provider "google" {
   # Authenticate using service account JSON (base64 decoded at runtime)

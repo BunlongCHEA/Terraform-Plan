@@ -887,7 +887,7 @@ run_all() {
     print_header "Running Full Workflow"
     
     create_directories
-    set_do_token
+    set_gcp_credentials
     terraform_init
     terraform_validate
     terraform_plan
@@ -1036,9 +1036,9 @@ case "${1:-}" in
         
         case $choice in
             1) run_all ;;
-            2) create_directories; set_do_token; terraform_init ;;
+            2) create_directories; set_gcp_credentials; terraform_init ;;
             3) terraform_plan ;;
-            4) set_do_token; terraform_apply; terraform_output ;;
+            4) set_gcp_credentials; terraform_apply; terraform_output ;;
             5) run_ansible_ansible ;;
             6) run_ansible_rancher ;;
             7) run_ansible_argocd ;;

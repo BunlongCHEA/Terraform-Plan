@@ -10,12 +10,3 @@ ansible_ssh_common_args='-o StrictHostKeyChecking=no'
 # Group all servers
 [all_servers:children]
 os_servers
-
-
-{% comment %} [os_servers]
-%{ for i, server in servers ~}
-${server.name} ansible_host=${server.network_interface[0].access_config[0].nat_ip} ansible_user=${ssh_user} ansible_ssh_private_key_file=${ssh_key_path} ansible_ssh_common_args='-o StrictHostKeyChecking=no'
-%{ endfor ~}
-
-[os_servers:vars]
-ansible_python_interpreter=/usr/bin/python3 {% endcomment %}

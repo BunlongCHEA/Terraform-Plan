@@ -1,7 +1,11 @@
 locals {
+  # Expand ~ to the actual home directory of whoever runs terraform
+  # Improved "permission denied" when ssh_path default doesn't match current user
+  resolved_ssh_path = pathexpand(var.ssh_path)
+
   # Define SSH key file paths using variable
-  private_key_path = "${var.ssh_path}/id_rsa_gke"
-  public_key_path  = "${var.ssh_path}/id_rsa_gke.pub"
+  private_key_path = "${local.resolved_ssh_path}/id_rsa_gke"
+  public_key_path  = "${local.resolved_ssh_path}/id_rsa_gke.pub"
   
   # Check if keys already exist locally
   keys_exist = fileexists(local.private_key_path)
@@ -33,12 +37,23 @@ locals {
   public_key_openssh = local.keys_exist ? data.local_file.existing_public_key[0].content : tls_private_key.ssh_key[0].public_key_openssh
 }
 
+# Ensure ~/.ssh directory exists before writing keys
+resource "terraform_data" "ensure_ssh_dir" {
+  count = local.keys_exist ? 0 : 1
+
+  provisioner "local-exec" {
+    command = "mkdir -p ${local.resolved_ssh_path} && chmod 700 ${local.resolved_ssh_path}"
+  }
+}
+
 # Save private key to local file if newly generated
 resource "local_file" "private_key" {
   count           = local.keys_exist ? 0 : 1
   content         = tls_private_key.ssh_key[0].private_key_pem
   filename        = local.private_key_path
   file_permission = "0600"
+
+  depends_on = [terraform_data.ensure_ssh_dir]
 }
 
 # Save public key to local file if newly generated
@@ -47,4 +62,6 @@ resource "local_file" "public_key" {
   content         = tls_private_key.ssh_key[0].public_key_openssh
   filename        = local.public_key_path
   file_permission = "0644"
+
+  depends_on = [terraform_data.ensure_ssh_dir]
 }
