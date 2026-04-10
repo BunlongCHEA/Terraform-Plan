@@ -7,4 +7,5 @@ droplet_os    = "ubuntu-24-04-x64" # Ubuntu 24.04
 droplet_size  = "s-1vcpu-2gb"   # Basic droplet
 droplet_count = 1
 ssh_key_name  = "<Replace with SSH key name>"
+ssh_path      = "~/.ssh"
 project_name  = "<Replace with any project name>"

@@ -77,6 +77,18 @@ You should see an output similar to Terraform v1.X.X on linux_amd64 (the exact v
 
 Choose Directory for different Cloud-Provider
 
+### Google Cloud (GCP)
+
+** Requirement: 
+
+Ensure Service Account has Permission:
+- roles/compute.securityAdmin       => Compute Security Admin
+- rolse/compute.admin               => Compute Admin
+- roles/iam.serviceAccountUser      => Service Account User
+
+
+### DigitalOcean
+
 ** Requirement:
 
 Ensure Cloud-Provider API Token have **Create/Delete** Permission
