@@ -11,6 +11,7 @@
 
 test-kubeconfig.yaml
 kubeconfig-base64.txt
+.vscode
 
 /gke/terraform.tfvars
 /gke/terraform.tfvars.bkp
