@@ -8,8 +8,10 @@
 /digitalocean/rancher/*
 /digitalocean/run_ansible.bat
 /digitalocean/group_vars/all.yml
+
 test-kubeconfig.yaml
 kubeconfig-base64.txt
+
 /gke/terraform.tfvars
 /gke/terraform.tfvars.bkp
 /gke/terraform.tfstat*
@@ -20,3 +22,14 @@ kubeconfig-base64.txt
 /gke/rancher/*
 /gke/run_ansible.bat
 /gke/group_vars/all.yml
+
+/raspberrypi/terraform.tfvars
+/raspberrypi/terraform.tfvars.bkp
+/raspberrypi/terraform.tfstat*
+/raspberrypi/.terraform.lock.hcl
+/raspberrypi/.terraform/*
+/raspberrypi/output/*
+/raspberrypi/rancher/*
+/raspberrypi/run_ansible.bat
+/raspberrypi/group_vars/all.yml
+/raspberrypi/variable.tf

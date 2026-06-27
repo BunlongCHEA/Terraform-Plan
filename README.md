@@ -86,6 +86,10 @@ Ensure Service Account has Permission:
 - rolse/compute.admin               => Compute Admin
 - roles/iam.serviceAccountUser      => Service Account User
 
+```bash
+ssh -i ~/.ssh/id_rsa_gke ubuntu@136.117.132.81 
+```
+
 
 ### DigitalOcean
 
@@ -259,3 +263,12 @@ Get Certificate All
 ```bash
 kubectl get certificate -A
 ```
+
+# Raspberry Pi
+
+Quick (manual login, good for one session):
+
+```bash
+cloudflared access login https://test.domain.site
+```
+

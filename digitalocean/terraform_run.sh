@@ -30,6 +30,7 @@ PLAYBOOK_RANCHER="$SCRIPT_DIR/ansible_install_rancher.yml"
 PLAYBOOK_RANCHER_MULTI="$SCRIPT_DIR/ansible_install_rancher_multi.yml"
 PLAYBOOK_ARGOCD="$SCRIPT_DIR/ansible_install_argocd.yml"
 PLAYBOOK_PROMETHEUS="$SCRIPT_DIR/ansible_install_prometheus_grafana.yml"
+PLAYBOOK_KYVERNO="$SCRIPT_DIR/ansible_install_kyverno.yml"
 SERVER="os_servers"
 
 # Uninstall playbook paths
@@ -318,6 +319,40 @@ run_ansible_prometheus() {
     print_info "Running playbook -- Installing Prometheus:  $PLAYBOOK_PROMETHEUS"
     ansible-playbook -i "$INVENTORY" "$PLAYBOOK_PROMETHEUS"
     print_success "Ansible playbook completed"
+}
+
+# Run Ansible playbook for installing Kyverno Policy Engine
+run_ansible_kyverno() {
+    print_header "Running Ansible Playbook - Install Kyverno (Policy Engine)"
+
+    [ ! -f "$INVENTORY" ] && print_error "Inventory not found: $INVENTORY" && return 1
+
+    if [ ! -f "$PLAYBOOK_KYVERNO" ]; then
+        print_error "Playbook not found: $PLAYBOOK_KYVERNO"
+        print_info "Expected: $PLAYBOOK_KYVERNO"
+        return 1
+    fi
+
+    print_info "This will install:"
+    print_info "  - Kyverno v${KYVERNO_VERSION:-3.4.4} (Policy Engine)"
+    print_info "  - kyverno-policies (Pod Security Standard — baseline)"
+    echo ""
+    print_info "Environment: Non-Production (Audit mode — violations logged, NOT blocked)"
+    print_warning "Requires: K3s + Helm already installed (run option 2/Rancher first)"
+    echo ""
+
+    read -p "Continue? (yes/no): " confirm
+    [ "$confirm" != "yes" ] && return 0
+
+    ansible-playbook -i "$INVENTORY" "$PLAYBOOK_KYVERNO"
+    print_success "Kyverno installed!"
+
+    print_header "KYVERNO ACCESS"
+    echo -e "${GREEN}  kubectl get pods -n kyverno${NC}"
+    echo -e "${GREEN}  kubectl get clusterpolicies${NC}"
+    echo -e "${GREEN}  kubectl get policyreport -A${NC}"
+    echo -e "${BLUE}  Mode: Audit (log only)${NC}"
+    echo -e "${YELLOW}  For Production: set validationFailureAction=Enforce in playbook${NC}"
 }
 
 # ===========================================
@@ -930,8 +965,9 @@ run_all() {
     echo "  2) Install Rancher (Terraform, cert-manager, Kubectl, K3s, Helm)"
     echo "  3) Install ArgoCD (ArgoCD, cert-manager)"
     echo "  4) Install Prometheus (Prometheus, Node Exporter)"
-    echo "  5) All of the above"
-    echo "  6) Skip"
+    echo "  5) Install Kyverno (Policy Engine — Non-Production/Audit)"
+    echo "  6) All of the above"
+    echo "  7) Skip"
     read -p "Enter Choice: " install_choice
     
     case $install_choice in
@@ -939,8 +975,9 @@ run_all() {
         2) run_ansible_rancher ;;
         3) run_ansible_argocd ;;
         4) run_ansible_prometheus ;;
-        5) run_ansible_ansible; run_ansible_rancher ; run_ansible_argocd ; run_ansible_prometheus ;;
-        6) print_info "Skipping software installation" ;;
+        5) run_ansible_kyverno ;;
+        6) run_ansible_ansible; run_ansible_rancher ; run_ansible_argocd ; run_ansible_prometheus ; run_ansible_kyverno ;;
+        7) print_info "Skipping software installation" ;;
     esac
     
     print_header "Workflow Complete!"
@@ -963,6 +1000,7 @@ Commands:
   ansible        Run basic software Ansible playbook
   rancher        Run Rancher prerequisites Ansible playbook
   prometheus     Run Prometheus & Grafana installation playbook
+  kyverno        Run Kyverno (Policy Engine)
   uninstall      Show uninstall menu
   help           Show this help
 
@@ -1025,6 +1063,9 @@ case "${1:-}" in
     prometheus)
         run_ansible_prometheus
         ;;
+    kyverno)
+        run_ansible_kyverno
+        ;; 
     uninstall)  
         uninstall_menu
         ;;
@@ -1043,10 +1084,11 @@ case "${1:-}" in
         echo "  6) Run Ansible playbook (Install Rancher)"
         echo "  7) Run Ansible playbook (Install ArgoCD)"
         echo "  8) Run Ansible playbook (Install Prometheus)"
-        echo "  9) Test Ansible connectivity"
-        echo "  10) Show outputs"
-        echo "  11) Uninstall components"
-        echo "  12) Destroy all resources"
+        echo "  9) Run Anisble playbook (Kyverno (Policy Engine))"
+        echo "  10) Test Ansible connectivity"
+        echo "  11) Show outputs"
+        echo "  12) Uninstall components"
+        echo "  13) Destroy all resources"
         echo "  0) Exit"
         echo ""
         read -p "Enter choice: " choice
@@ -1060,10 +1102,11 @@ case "${1:-}" in
             6) run_ansible_rancher ;;
             7) run_ansible_argocd ;;
             8) run_ansible_prometheus ;;
-            9) test_ansible ;;
-            10) terraform_output ;;
-            11) uninstall_menu ;;
-            12) terraform_destroy ;;
+            9) run_ansible_kyverno ;;
+            10) test_ansible ;;
+            11) terraform_output ;;
+            12) uninstall_menu ;;
+            13) terraform_destroy ;;
             0) echo "Exited... "; exit 0 ;;
             *) print_error "Invalid option"; exit 1 ;;
         esac

@@ -1,0 +1,39 @@
+================================================================================
+                    EXISTING HOST(S) - NO VM CREATED BY TERRAFORM
+================================================================================
+
+Generated: ${timestamp()}
+
+SSH Config File: ${ssh_config_path}
+
+--------------------------------------------------------------------------------
+HOST DETAILS
+--------------------------------------------------------------------------------
+%{ for idx, host in pi_hosts ~}
+
+Server ${idx + 1}: ${host.name}
+  - SSH Alias (Host in ~/.ssh/config): ${host.ansible_host}
+  - Ansible User: ${host.ansible_user}
+  - SSH Command: ssh ${host.ansible_host}
+
+%{ endfor ~}
+--------------------------------------------------------------------------------
+QUICK SSH COMMANDS (Copy & Paste)
+--------------------------------------------------------------------------------
+%{ for host in pi_hosts ~}
+ssh ${host.ansible_host}
+%{ endfor ~}
+
+--------------------------------------------------------------------------------
+Ansible Commands
+--------------------------------------------------------------------------------
+# Test connectivity:
+ansible -i output/inventory.ini os_servers -m ping
+
+# Run playbook:
+ansible-playbook -i output/inventory.ini ansible_install_ansible.yml
+ansible-playbook -i output/inventory.ini ansible_install_rancher.yml
+ansible-playbook -i output/inventory.ini ansible_install_argocd.yml
+ansible-playbook -i output/inventory.ini ansible_install_prometheus_grafana.yml
+
+================================================================================

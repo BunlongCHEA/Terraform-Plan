@@ -1,0 +1,29 @@
+# Rename terraform.tfvars.example => terraform.tfvars
+# Copy and fill in values for terraform.tfvars
+
+project_name = "ansible-lab"
+
+# Make sure each "ansible_host" below already exists as a Host alias in
+# ~/.ssh/config (the one handling your Cloudflare Tunnel), e.g.:
+#
+#   Host pi5-1-remote
+#     HostName pi5-1.example.com
+#     User pi
+#     ProxyCommand cloudflared access ssh --hostname %h
+#     IdentityFile ~/.ssh/id_ed25519
+
+pi_hosts = [
+  {
+    name         = "pi5-1"
+    ansible_host = "pi5-1-remote"
+    ansible_user = "pi"
+  }
+  # Add more existing hosts here if you have them, e.g.:
+  # {
+  #   name         = "pi5-2"
+  #   ansible_host = "pi5-2-remote"
+  #   ansible_user = "pi"
+  # }
+]
+
+ssh_config_path = "~/.ssh/config"

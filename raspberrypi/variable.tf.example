@@ -1,0 +1,62 @@
+variable "project_name" {
+  description = "Project name prefix, used only for labelling output files"
+  type        = string
+  default     = "ansible-lab"
+}
+
+# ---------------------------------------------------------------------------
+# Existing hosts (NOT created by Terraform)
+# ---------------------------------------------------------------------------
+# Each entry describes a machine that already exists - e.g. your Raspberry Pi 5
+# reachable through a Cloudflare Tunnel via an SSH config alias.
+#
+# Because the alias (ansible_host) is already defined in ~/.ssh/config with its
+# own ProxyCommand/IdentityFile (cloudflared access ssh), Ansible/SSH will pick
+# that up automatically - no key path or IP address needs to be supplied here.
+#
+# Example ~/.ssh/config entry that this variable expects to exist already:
+#
+#   Host pi5-1-remote
+#     HostName pi5-1.example.com
+#     User pi
+#     ProxyCommand cloudflared access ssh --hostname %h
+#     IdentityFile ~/.ssh/id_ed25519
+#
+variable "pi_hosts" {
+  description = "List of existing hosts to manage with Ansible (no Terraform resource is created for these)"
+  type = list(object({
+    name         = string           # Friendly inventory name, e.g. "pi5-1"
+    ansible_host = string           # SSH config Host alias, e.g. "pi5-1-remote"
+    ansible_user = optional(string, "pi-admin") # Optional, defaults to "pi-admin" if not provided
+  }))
+
+  default = [
+    {
+      name         = "pi5-1"
+      ansible_host = "pi5-1-remote"
+      ansible_user = "pi-admin"
+    }
+  ]
+}
+
+# Path to the SSH config file that already defines the aliases above.
+# Used only to render into the inventory's ansible_ssh_common_args (-F flag)
+# so Ansible/SSH definitely loads the same config you use manually.
+variable "ssh_config_path" {
+  description = "Path to the SSH config file containing the Host aliases (e.g. pi5-1-remote)"
+  type        = string
+  default     = "~/.ssh/config"
+}
+
+# Cloudflare Access (and similar browser-login ProxyCommands) can't complete
+# an interactive login inside Terraform's non-interactive local-exec - it will
+# just time out waiting for you to open a URL that never gets opened.
+# Keep this true (default) and verify connectivity afterwards with:
+#   ./terraform_run.sh test      (option 9 in the menu)
+# Only set to false once cloudflared already has a cached/service token so the
+# SSH connection succeeds non-interactively.
+variable "skip_ssh_check" {
+  description = "Skip the Terraform-time SSH reachability check (recommended when using Cloudflare Access browser login)"
+  type        = bool
+  default     = true
+}
