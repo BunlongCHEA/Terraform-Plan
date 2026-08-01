@@ -1,0 +1,10 @@
+server.name: kyc-kibana
+server.host: "0.0.0.0"
+server.port: 5601
+
+# In-cluster DNS name for the Elasticsearch Service (see es-service.yaml),
+# namespace = logging
+elasticsearch.hosts: ["http://elasticsearch.logging.svc:9200"]
+
+# security is disabled on the ES side (see elasticsearch.yml), so no
+# username/password needed here for now

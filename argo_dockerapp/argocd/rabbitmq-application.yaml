@@ -1,0 +1,24 @@
+# Place alongside k8s/argocd/app/kyc-python-application.yaml in your repo.
+# Adjust repoURL/path to wherever you commit the rabbitmq/k8s/ folder above.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: kyc-rabbitmq
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/BunlongCHEA/Python-Blockchain-KYC.git   # <- confirm/replace
+    targetRevision: HEAD
+    path: argo_dockerapp/rabbitmq/k8s
+    directory:
+      recurse: true
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: rabbitmq
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true

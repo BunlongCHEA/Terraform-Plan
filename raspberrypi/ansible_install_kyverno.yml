@@ -1,0 +1,392 @@
+---
+# ===========================================
+# Ansible Playbook: Install Kyverno via Helm
+# Kyverno: Kubernetes Native Policy Management
+# Docs: https://kyverno.io/docs/installation/methods/#install-kyverno-using-helm
+# ===========================================
+# Environments:
+#   Non-Production (default): single replica, no HA, debug logging
+#   Production (commented):   3 replicas, HA, resource limits, audit mode
+# ===========================================
+
+- name: Install Kyverno via Helm
+  hosts: os_servers
+  become: yes
+  gather_facts: yes
+
+  vars:
+    kubeconfig_path:   /etc/rancher/k3s/k3s.yaml
+    kyverno_namespace: kyverno
+    kyverno_version:   "3.8.0"   # https://github.com/kyverno/kyverno/releases
+
+  tasks:
+    # ==========================================
+    # Pre-flight Checks
+    # ==========================================
+    - name: Check Helm is installed
+      command: helm version --short
+      register: helm_check
+      changed_when: false
+      failed_when: helm_check.rc != 0
+
+    - name: Check kubectl is available
+      command: kubectl version --client --short
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: kubectl_check
+      changed_when: false
+      ignore_errors: yes
+
+    - name: Check K3s node is Ready
+      shell: |
+        export KUBECONFIG={{ kubeconfig_path }}
+        kubectl get nodes --no-headers | grep -v "Ready" | wc -l
+      register: not_ready_nodes
+      changed_when: false
+      failed_when: not_ready_nodes.stdout | int > 0
+
+    # ==========================================
+    # Add Kyverno Helm Repository
+    # ==========================================
+    - name: Add Kyverno Helm repository
+      shell: |
+        export KUBECONFIG={{ kubeconfig_path }}
+        helm repo add kyverno https://kyverno.github.io/kyverno/
+        helm repo update
+      args:
+        executable: /bin/bash
+      register: helm_repo
+      changed_when: "'has been added' in helm_repo.stdout or 'Update Complete' in helm_repo.stdout"
+
+    # ==========================================
+    # Create Namespace
+    # ==========================================
+    - name: Create kyverno namespace
+      shell: |
+        export KUBECONFIG={{ kubeconfig_path }}
+        kubectl get namespace {{ kyverno_namespace }} 2>/dev/null || \
+        kubectl create namespace {{ kyverno_namespace }}
+      args:
+        executable: /bin/bash
+      register: ns_result
+      changed_when: "'created' in ns_result.stdout"
+
+    # ==========================================
+    # Check if already installed
+    # ==========================================
+    - name: Check if Kyverno is already installed
+      shell: |
+        export KUBECONFIG={{ kubeconfig_path }}
+        helm list -n {{ kyverno_namespace }} -q | grep -w kyverno
+      args:
+        executable: /bin/bash
+      register: kyverno_installed
+      ignore_errors: yes
+      changed_when: false
+
+    # ==========================================
+    # Write values file — NON-PRODUCTION
+    # ==========================================
+    # To switch to Production: comment this task and uncomment the Production task below
+    - name: Write Kyverno values file (Non-Production)
+      copy:
+        dest: /tmp/kyverno-values.yml
+        mode: "0644"
+        content: |
+          # =============================================
+          # Kyverno Helm Values — NON-PRODUCTION (Dev)
+          # =============================================
+          # Single replica, Audit mode (log only, no blocking), debug logging
+          # For Production: see comments below
+
+          admissionController:
+            replicas: 1
+            # Production: replicas: 3
+
+          backgroundController:
+            replicas: 1
+            # Production: replicas: 2
+
+          cleanupController:
+            replicas: 1
+            # Production: replicas: 2
+
+          reportsController:
+            replicas: 1
+            # Production: replicas: 2
+
+          # Resource limits — relaxed for dev
+          # Production: increase limits and set stricter requests
+          admissionController:
+            container:
+              resources:
+                limits:
+                  memory: "256Mi"
+                  cpu:    "500m"
+                requests:
+                  memory: "128Mi"
+                  cpu:    "100m"
+
+          # Audit = log violations only, do NOT block
+          # Production: change to Enforce to block violations
+          config:
+            defaultRegistry: docker.io
+
+          features:
+            logging:
+              verbosity: 6
+              # Production verbosity: 2
+
+          # HA / Anti-Affinity — disabled for dev (single node)
+          # Production: uncomment below
+          # admissionController:
+          #   podAntiAffinity:
+          #     preferredDuringSchedulingIgnoredDuringExecution:
+          #       - weight: 100
+          #         podAffinityTerm:
+          #           topologyKey: kubernetes.io/hostname
+
+          # PodDisruptionBudget — disabled for dev
+          # Production: uncomment below
+          # podDisruptionBudget:
+          #   enabled: true
+          #   minAvailable: 1
+
+          # Metrics for Prometheus — optional
+          # Production: uncomment to enable scraping
+          # serviceMonitor:
+          #   enabled: true
+          #   namespace: monitoring
+
+    # ==========================================
+    # Install / Upgrade Kyverno
+    # ==========================================
+    - name: Install Kyverno via Helm (Non-Production)
+      shell: |
+        export KUBECONFIG={{ kubeconfig_path }}
+        helm upgrade --install kyverno kyverno/kyverno \
+          --namespace {{ kyverno_namespace }} \
+          --version {{ kyverno_version }} \
+          --values /tmp/kyverno-values.yml \
+          --wait \
+          --timeout 10m
+      args:
+        executable: /bin/bash
+      register: kyverno_install
+      changed_when: true
+
+    # ==========================================
+    # Wait for Kyverno to be Ready
+    # ==========================================
+    - name: Wait for Kyverno admission controller to be ready
+      shell: |
+        export KUBECONFIG={{ kubeconfig_path }}
+        kubectl wait --for=condition=Available deployment \
+          --all -n {{ kyverno_namespace }} \
+          --timeout=300s
+      args:
+        executable: /bin/bash
+      retries: 5
+      delay: 15
+      register: kyverno_ready
+      until: kyverno_ready.rc == 0
+
+    # ==========================================
+    # Install Kyverno Policies (Non-Production)
+    # ==========================================
+    # Kyverno Pod Security Standard policies — best-practice baseline
+    # Non-Prod: audit mode — logs violations but does not block
+    # Production: change to kyverno-policies with Enforce mode
+    - name: Add Kyverno policies Helm repo
+      shell: |
+        export KUBECONFIG={{ kubeconfig_path }}
+        helm repo add kyverno-policies https://kyverno.github.io/kyverno/
+        helm repo update
+      args:
+        executable: /bin/bash
+      ignore_errors: yes
+
+    - name: Check if kyverno-policies is installed
+      shell: |
+        export KUBECONFIG={{ kubeconfig_path }}
+        helm list -n {{ kyverno_namespace }} -q | grep -w kyverno-policies
+      args:
+        executable: /bin/bash
+      register: policies_installed
+      ignore_errors: yes
+      changed_when: false
+
+    - name: Install Kyverno Pod Security Standard policies (Non-Production — Audit)
+      shell: |
+        export KUBECONFIG={{ kubeconfig_path }}
+        helm upgrade --install kyverno-policies kyverno/kyverno-policies \
+          --namespace {{ kyverno_namespace }} \
+          --version {{ kyverno_version }} \
+          --set podSecurityStandard=baseline \
+          --set validationFailureAction=Audit \
+          --wait \
+          --timeout 5m
+        # Production: change validationFailureAction=Enforce
+        # Production: change podSecurityStandard=restricted (stricter)
+      args:
+        executable: /bin/bash
+      when: policies_installed.rc != 0
+      register: policies_install
+      changed_when: true
+
+    # ==========================================
+    # Verification
+    # ==========================================
+    - name: Get Kyverno pods
+      shell: |
+        export KUBECONFIG={{ kubeconfig_path }}
+        kubectl get pods -n {{ kyverno_namespace }} -o wide
+      args:
+        executable: /bin/bash
+      register: kyverno_pods
+      changed_when: false
+
+    - name: Get Kyverno Helm releases
+      shell: |
+        export KUBECONFIG={{ kubeconfig_path }}
+        helm list -n {{ kyverno_namespace }}
+      args:
+        executable: /bin/bash
+      register: kyverno_releases
+      changed_when: false
+
+    - name: Get ClusterPolicies installed
+      shell: |
+        export KUBECONFIG={{ kubeconfig_path }}
+        kubectl get clusterpolicies 2>/dev/null || echo "No cluster policies found"
+      args:
+        executable: /bin/bash
+      register: cluster_policies
+      changed_when: false
+
+    - name: Get Kyverno version
+      shell: |
+        export KUBECONFIG={{ kubeconfig_path }}
+        kubectl get deployment kyverno-admission-controller \
+          -n {{ kyverno_namespace }} \
+          -o jsonpath='{.spec.template.spec.containers[0].image}'
+      args:
+        executable: /bin/bash
+      register: kyverno_image
+      changed_when: false
+      ignore_errors: yes
+
+    # ==========================================
+    # Cleanup
+    # ==========================================
+    - name: Remove temporary values file
+      file:
+        path: /tmp/kyverno-values.yml
+        state: absent
+
+    # ==========================================
+    # Save access info
+    # ==========================================
+    - name: Set Kyverno access info
+      set_fact:
+        kyverno_access_info: |
+          ===========================================================
+          KYVERNO INSTALLATION INFORMATION
+          ===========================================================
+
+          Environment:  Non-Production (Dev/Staging)
+          Version:      {{ kyverno_version }}
+          Namespace:    {{ kyverno_namespace }}
+          Mode:         Audit (log only — violations NOT blocked)
+
+          ===========================================================
+          INSTALLED COMPONENTS
+          ===========================================================
+          ✓ kyverno              — admission controller, policy engine
+          ✓ kyverno-policies     — Pod Security Standard (baseline)
+
+          ===========================================================
+          USEFUL COMMANDS
+          ===========================================================
+
+          # List all Kyverno pods
+          kubectl get pods -n kyverno
+
+          # List all ClusterPolicies
+          kubectl get clusterpolicies
+
+          # Check policy reports (audit results)
+          kubectl get policyreport -A
+          kubectl get clusterpolicyreport
+
+          # View a specific policy
+          kubectl describe clusterpolicy disallow-privileged-containers
+
+          # Test a policy (dry-run)
+          kubectl apply --dry-run=server -f your-pod.yml
+
+          # View Kyverno logs
+          kubectl logs -n kyverno -l app.kubernetes.io/component=admission-controller -f
+
+          ===========================================================
+          TO SWITCH TO PRODUCTION
+          ===========================================================
+          1. In ansible_install_kyverno.yml:
+             - Set admissionController.replicas: 3
+             - Set backgroundController.replicas: 2
+             - Set validationFailureAction: Enforce
+             - Set features.logging.verbosity: 2
+             - Enable podAntiAffinity
+             - Enable podDisruptionBudget
+             - Enable serviceMonitor (for Prometheus)
+          2. In kyverno-policies install:
+             - Change --set validationFailureAction=Enforce
+             - Change --set podSecurityStandard=restricted
+
+          ===========================================================
+
+    - name: Save Kyverno info to remote server
+      copy:
+        dest: /root/kyverno-access-info.txt
+        content: "{{ kyverno_access_info }}"
+        mode: "0644"
+
+    - name: Save Kyverno info to local machine
+      delegate_to: localhost
+      become: no
+      copy:
+        dest: ./rancher/kyverno-access-info.txt
+        content: "{{ kyverno_access_info }}"
+        mode: "0644"
+
+    # ==========================================
+    # Display Summary
+    # ==========================================
+    - name: Display Kyverno installation summary
+      debug:
+        msg:
+          - "==========================================================="
+          - "          KYVERNO INSTALLATION COMPLETE!"
+          - "==========================================================="
+          - ""
+          - "Environment:  Non-Production (Dev / Audit Mode)"
+          - "Namespace:    {{ kyverno_namespace }}"
+          - "Version:      {{ kyverno_version }}"
+          - "Image:        {{ kyverno_image.stdout | default('N/A') }}"
+          - ""
+          - "PODS:"
+          - "{{ kyverno_pods.stdout_lines }}"
+          - ""
+          - "HELM RELEASES:"
+          - "{{ kyverno_releases.stdout_lines }}"
+          - ""
+          - "CLUSTER POLICIES:"
+          - "{{ cluster_policies.stdout_lines }}"
+          - ""
+          - "==========================================================="
+          - "MODE: Audit (logs violations, does NOT block)"
+          - "For Production: change validationFailureAction=Enforce"
+          - "==========================================================="
+          - ""
+          - "✅ Kyverno is running and ready!"
+          - ""
