@@ -37,14 +37,22 @@ spec:
       containers:
         - name: elasticsearch
           image: docker.elastic.co/elasticsearch/elasticsearch:9.4.4
+          env:
+            - name: discovery.type
+              value: "single-node"
+            - name: xpack.security.enabled
+              value: "false"
+            - name: xpack.security.http.ssl.enabled
+              value: "false"
+            - name: xpack.security.transport.ssl.enabled
+              value: "false"
+            - name: ES_JAVA_OPTS
+              value: "-Xms512m -Xmx512m"
           ports:
             - containerPort: 9200
               name: http
             - containerPort: 9300
               name: transport
-          env:
-            - name: ES_JAVA_OPTS
-              value: "-Xms512m -Xmx512m"
           resources:
             requests:
               cpu: 250m
