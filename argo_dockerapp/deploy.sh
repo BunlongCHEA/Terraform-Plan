@@ -3,21 +3,13 @@
 # ===========================================
 # argo_dockerapp/deploy.sh
 # ===========================================
-# Deploys the ELK(+Fluent Bit) logging stack and/or RabbitMQ to the K3s
-# cluster, via kubectl apply + ArgoCD force-sync.
+# Deploys ELK (Desktop-hosted) + Fluent Bit (any number of servers) +
+# RabbitMQ, via kubectl apply + ArgoCD force-sync.
 #
-# Connection verification mirrors the before_script block already used in
-# this repo's .gitlab-ci.yml files (decode kubeconfig if running in CI,
-# otherwise use the local K3s kubeconfig on the Raspberry Pi, then
-# `kubectl cluster-info` / `kubectl get nodes` to confirm success before
-# doing anything else).
+# All cluster targets, Elasticsearch location, and ArgoCD destinations
+# are defined once in deploy.env -- see that file to add/change a server.
 #
-# Usage: ./deploy.sh [test|logging|logging-only|rabbitmq|all]
-#   test           - only verify cluster connectivity, deploy nothing
-#   logging        - deploy Elasticsearch + Kibana + Fluent Bit
-#   logging-only   - deploy Elasticsearch + Kibana WITHOUT Fluent Bit
-#   rabbitmq       - deploy RabbitMQ
-#   all            - deploy everything (logging + Fluent Bit + rabbitmq)
+# Usage: ./deploy.sh [test|es-kibana|fluentbit-single|fluentbit-multi|rabbitmq|all]
 # No argument shows an interactive menu.
 # ===========================================
 
@@ -34,15 +26,16 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
 LOGGING_K8S_DIR="$SCRIPT_DIR/elk-fluentbit/k8s"
+FLUENT_BIT_DIR="$LOGGING_K8S_DIR/fluent-bit"
 RABBITMQ_K8S_DIR="$SCRIPT_DIR/rabbitmq/k8s"
 ARGOCD_DIR="$SCRIPT_DIR/argocd"
 
-# Files that make up Fluent Bit specifically, so "logging-only" can skip them
-FLUENT_BIT_FILES=(
-  "30-fluent-bit-rbac.yaml"
-  "31-fluent-bit-configmap.yaml"
-  "32-fluent-bit-daemonset.yaml"
-)
+if [ -f "$SCRIPT_DIR/deploy.env" ]; then
+    source "$SCRIPT_DIR/deploy.env"
+else
+    echo "deploy.env not found -- copy deploy.env.example and configure it first"
+    exit 1
+fi
 
 print_header() { echo ""; echo -e "${CYAN}==========================================${NC}"; echo -e "${CYAN}  $1${NC}"; echo -e "${CYAN}==========================================${NC}"; echo ""; }
 print_success() { echo -e "${GREEN}✔ $1${NC}"; }
@@ -51,56 +44,75 @@ print_error()   { echo -e "${RED}✖ $1${NC}"; }
 print_info()    { echo -e "${BLUE}ℹ $1${NC}"; }
 
 # ===========================================
-# Connection verification (same shape as .gitlab-ci.yml before_script)
+# Helper: resolve a server's ArgoCD destination.server value
+# ===========================================
+get_argocd_destination() {
+    local name="$1"
+    if [ "$name" = "$ARGOCD_HOST_SERVER_NAME" ]; then
+        echo "https://kubernetes.default.svc"
+    else
+        local var="${name^^}_ARGOCD_DEST"
+        echo "${!var}"
+    fi
+}
+
+# ===========================================
+# Connection verification -- ALL configured K3s servers
 # ===========================================
 verify_connection() {
-    print_header "Verifying Kubernetes Cluster Connection"
-
-    SSH_TUNNEL_HOST="${SSH_TUNNEL_HOST:pi5-1-remote}"   # your ~/.ssh/config alias
-    TUNNEL_PID=""
+    print_header "Verifying Kubernetes Cluster Connection(s)"
 
     if [ -f /etc/rancher/k3s/k3s.yaml ]; then
-        # Case 1: running directly on the Pi/K3s node — no tunnel needed.
-        print_info "Running on the K3s node — using /etc/rancher/k3s/k3s.yaml"
+        # Running directly on a k3s node -- verify just this local cluster.
+        print_info "Running on a K3s node -- using /etc/rancher/k3s/k3s.yaml"
         export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+        kubectl cluster-info
+        echo ""
+        kubectl get nodes
+        print_success "Local cluster connection verified"
+        return 0
+    fi
 
-    elif [ -n "$KUBE_CONFIG_BASE64" ]; then
-        # Case 2: running remotely (laptop or CI) with the base64 kubeconfig
-        # from /tmp/k3s-config-base64.txt exported as an env var/CI variable.
-        print_info "KUBE_CONFIG_BASE64 detected — decoding kubeconfig..."
-        mkdir -p ~/.kube
-        echo "$KUBE_CONFIG_BASE64" | base64 -d > ~/.kube/config
-        chmod 600 ~/.kube/config
-        export KUBECONFIG=~/.kube/config
+    # Not on a node -- verify EVERY server in deploy.env, opening an SSH
+    # tunnel per server (on its own local port) if one isn't already up.
+    local failures=0
+    for name in "${K3S_SERVER_NAMES[@]}"; do
+        echo ""
+        print_info "--- Checking server: $name ---"
 
-        # Kubeconfig still says https://127.0.0.1:6443 — that's only reachable
-        # once tunneled through the Pi via SSH/Cloudflare Access, so open that
-        # tunnel now unless it's already up.
-        if ! nc -z 127.0.0.1 6443 2>/dev/null; then
-            print_info "Opening SSH tunnel to $SSH_TUNNEL_HOST for the k3s API (port 6443)..."
-            ssh -f -N -L 6443:127.0.0.1:6443 "$SSH_TUNNEL_HOST"
-            TUNNEL_PID=$(pgrep -f "6443:127.0.0.1:6443.*$SSH_TUNNEL_HOST" | head -1)
-            sleep 2
-        else
-            print_info "Port 6443 already forwarded locally — reusing existing tunnel"
+        local ssh_host="$(eval echo \$${name^^}_SSH_HOST)"
+        local local_port="$(eval echo \$${name^^}_LOCAL_PORT)"
+        local kubeconfig_path="$(eval echo \$${name^^}_KUBECONFIG)"
+
+        if [ ! -f "$kubeconfig_path" ]; then
+            print_error "$name: kubeconfig not found at $kubeconfig_path (see README setup steps)"
+            failures=$((failures + 1))
+            continue
         fi
 
-    else
-        print_info "Using default kubeconfig (\$KUBECONFIG or ~/.kube/config)"
-    fi
+        if ! nc -z 127.0.0.1 "$local_port" 2>/dev/null; then
+            print_info "$name: opening SSH tunnel via $ssh_host -> local port $local_port"
+            ssh -f -N -L "${local_port}:127.0.0.1:6443" "$ssh_host"
+            sleep 2
+        else
+            print_info "$name: local port $local_port already forwarded -- reusing"
+        fi
 
-    print_info "Testing connection to K3s cluster..."
-    if ! kubectl cluster-info >/dev/null 2>&1; then
-        print_error "Cannot reach the cluster."
-        print_error "If running remotely, confirm: ssh $SSH_TUNNEL_HOST works on its own, and TUNNEL_SERVICE_TOKEN_ID/SECRET are set for non-interactive runs."
-        [ -n "$TUNNEL_PID" ] && kill "$TUNNEL_PID" 2>/dev/null
+        if KUBECONFIG="$kubeconfig_path" kubectl cluster-info >/dev/null 2>&1; then
+            print_success "$name: connected"
+            KUBECONFIG="$kubeconfig_path" kubectl get nodes
+        else
+            print_error "$name: FAILED -- debug with: ssh -v -N -L ${local_port}:127.0.0.1:6443 $ssh_host"
+            failures=$((failures + 1))
+        fi
+    done
+
+    echo ""
+    if [ "$failures" -gt 0 ]; then
+        print_error "$failures server(s) failed connectivity check"
         exit 1
     fi
-
-    kubectl cluster-info
-    echo ""
-    kubectl get nodes
-    print_success "Cluster connection verified"
+    print_success "All configured K3s servers verified"
 }
 
 # ===========================================
@@ -112,7 +124,6 @@ apply_and_sync_argocd_app() {
 
     print_info "Applying ArgoCD Application manifest: $app_manifest"
     kubectl apply -f "$app_manifest"
-
     sleep 5
 
     if kubectl get application "$app_name" -n argocd >/dev/null 2>&1; then
@@ -121,48 +132,60 @@ apply_and_sync_argocd_app() {
           -p '{"operation":{"sync":{"syncStrategy":{"apply":{"force":true}}}}}' || true
         print_success "$app_name sync triggered"
     else
-        print_warning "$app_name ArgoCD application not found yet, skipping sync (ArgoCD will pick it up on its next reconcile)"
+        print_warning "$app_name ArgoCD application not found yet, skipping sync"
     fi
 }
 
 # ===========================================
 # Deploy functions
 # ===========================================
-deploy_logging() {
-    local with_fluentbit="$1"   # "yes" or "no"
+deploy_es_kibana() {
+    print_header "Deploying Elasticsearch + Kibana (host: $ES_HOST_SERVER_NAME)"
 
-    print_header "Deploying Elasticsearch + Kibana$( [ "$with_fluentbit" = "yes" ] && echo ' + Fluent Bit' )"
+    kubectl apply -f "$LOGGING_K8S_DIR/elasticsearch-kibana/00-namespace.yaml"
+    kubectl apply -f "$LOGGING_K8S_DIR/elasticsearch-kibana/10-elasticsearch.yaml"
+    kubectl apply -f "$LOGGING_K8S_DIR/elasticsearch-kibana/20-kibana.yaml"
 
-    kubectl apply -f "$LOGGING_K8S_DIR/00-namespace.yaml"
-    kubectl apply -f "$LOGGING_K8S_DIR/10-elasticsearch.yaml"
-    kubectl apply -f "$LOGGING_K8S_DIR/20-kibana.yaml"
+    local dest="$(get_argocd_destination "$ES_HOST_SERVER_NAME")"
+    local rendered="/tmp/kyc-es-kibana-application.yaml"
+    DEST_SERVER="$dest" envsubst '${DEST_SERVER}' \
+        < "$ARGOCD_DIR/es-kibana-application.yaml.tmpl" > "$rendered"
+    apply_and_sync_argocd_app "$rendered" "kyc-es-kibana"
+    rm -f "$rendered"
 
-    if [ "$with_fluentbit" = "yes" ]; then
-        for f in "${FLUENT_BIT_FILES[@]}"; do
-            kubectl apply -f "$LOGGING_K8S_DIR/$f"
-        done
-        print_success "Fluent Bit installed (cluster-wide, all namespaces)"
-    else
-        print_warning "Skipped Fluent Bit — no pod logs will ship to Elasticsearch yet."
-        print_info "Run '$0 logging' later to add it without touching ES/Kibana."
-    fi
-
-    apply_and_sync_argocd_app "$ARGOCD_DIR/logging-application.yaml" "kyc-logging-stack"
-
-    print_success "Logging stack deploy triggered"
+    print_success "ES + Kibana deploy triggered"
     print_info "Check: kubectl get pods -n logging"
+}
+
+deploy_fluent_bit_local() {
+    print_header "Deploying Fluent Bit on this server -> ${ES_HOST}:${ES_PORT}"
+    kubectl apply -f "$FLUENT_BIT_DIR/30-fluent-bit-rbac.yaml"
+    ES_HOST="$ES_HOST" ES_PORT="$ES_PORT" \
+        envsubst '${ES_HOST} ${ES_PORT}' < "$FLUENT_BIT_DIR/31-fluent-bit-configmap.yaml.tmpl" \
+        | kubectl apply -f -
+    kubectl apply -f "$FLUENT_BIT_DIR/32-fluent-bit-daemonset.yaml"
+    print_success "Fluent Bit deployed, forwarding to ${ES_HOST}:${ES_PORT}"
+}
+
+deploy_fluent_bit_multi_argocd() {
+    print_header "Rolling out Fluent Bit to ${#K3S_SERVER_NAMES[@]} server(s) via ArgoCD"
+    for name in "${K3S_SERVER_NAMES[@]}"; do
+        local app_name="kyc-fluentbit-${name}"
+        local dest="$(get_argocd_destination "$name")"
+        local rendered="/tmp/${app_name}-application.yaml"
+        APP_NAME="$app_name" DEST_SERVER="$dest" \
+            envsubst '${APP_NAME} ${DEST_SERVER}' < "$ARGOCD_DIR/fluent-bit-application.yaml.tmpl" > "$rendered"
+        apply_and_sync_argocd_app "$rendered" "$app_name"
+        rm -f "$rendered"
+    done
 }
 
 deploy_rabbitmq() {
     print_header "Deploying RabbitMQ (single node)"
-
     kubectl apply -f "$RABBITMQ_K8S_DIR/00-namespace-and-secret.yaml"
     kubectl apply -f "$RABBITMQ_K8S_DIR/10-rabbitmq.yaml"
-
     apply_and_sync_argocd_app "$ARGOCD_DIR/rabbitmq-application.yaml" "kyc-rabbitmq"
-
     print_success "RabbitMQ deploy triggered"
-    print_info "Check: kubectl get pods -n rabbitmq"
 }
 
 # ===========================================
@@ -170,30 +193,18 @@ deploy_rabbitmq() {
 # ===========================================
 run_option() {
     case "$1" in
-        test)
-            verify_connection
-            ;;
-        logging)
-            verify_connection
-            deploy_logging "yes"
-            ;;
-        logging-only)
-            verify_connection
-            deploy_logging "no"
-            ;;
-        rabbitmq)
-            verify_connection
-            deploy_rabbitmq
-            ;;
+        test)             verify_connection ;;
+        es-kibana)        verify_connection; deploy_es_kibana ;;
+        fluentbit-single) verify_connection; deploy_fluent_bit_local ;;
+        fluentbit-multi)  verify_connection; deploy_fluent_bit_multi_argocd ;;
+        rabbitmq)         verify_connection; deploy_rabbitmq ;;
         all)
             verify_connection
-            deploy_logging "yes"
+            deploy_es_kibana
+            deploy_fluent_bit_multi_argocd
             deploy_rabbitmq
             ;;
-        *)
-            print_error "Unknown option: $1"
-            exit 1
-            ;;
+        *) print_error "Unknown option: $1"; exit 1 ;;
     esac
 }
 
@@ -202,42 +213,33 @@ if [ -n "$1" ]; then
 else
     echo ""
     echo "Select an option:"
-    echo "  1) Test cluster connectivity only"
-    echo "  2) Deploy Elasticsearch + Kibana"
-    echo "  3) Deploy RabbitMQ"
-    echo "  4) Deploy everything"
+    echo "  1) Test connectivity to all configured K3s servers"
+    echo "  2) Deploy Elasticsearch + Kibana (host: $ES_HOST_SERVER_NAME)"
+    echo "  3) Deploy Fluent Bit"
+    echo "  4) Deploy RabbitMQ"
+    echo "  5) Deploy everything"
     echo "  0) Exit"
     echo ""
     read -p "Enter choice: " choice
 
     case $choice in
-        1)
-            run_option test
-            ;;
-        2)
+        1) run_option test ;;
+        2) run_option es-kibana ;;
+        3)
             echo ""
-            echo "Also install Fluent Bit now (ships pod logs into Elasticsearch)?"
-            echo "  1) Yes — full logging stack (ES + Kibana + Fluent Bit)"
-            echo "  2) No  — ES + Kibana only, add Fluent Bit later"
-            read -p "Enter choice: " fb_choice
-            case $fb_choice in
-                1) run_option logging ;;
-                2) run_option logging-only ;;
+            echo "  1) This single server only"
+            echo "  2) All servers in deploy.env, via ArgoCD"
+            read -p "Enter choice: " fb_mode
+            case $fb_mode in
+                1) run_option fluentbit-single ;;
+                2) run_option fluentbit-multi ;;
                 *) print_error "Invalid option"; exit 1 ;;
             esac
             ;;
-        3)
-            run_option rabbitmq
-            ;;
-        4)
-            run_option all
-            ;;
-        0)
-            echo "Exited..."; exit 0
-            ;;
-        *)
-            print_error "Invalid option"; exit 1
-            ;;
+        4) run_option rabbitmq ;;
+        5) run_option all ;;
+        0) echo "Exited..."; exit 0 ;;
+        *) print_error "Invalid option"; exit 1 ;;
     esac
 fi
 

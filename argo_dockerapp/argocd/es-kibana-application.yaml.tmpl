@@ -14,7 +14,8 @@ spec:
     directory:
       recurse: true
   destination:
-    server: https://kubernetes.default.svc
+    # server: https://kubernetes.default.svc
+    server: ${DEST_SERVER}
     namespace: logging
   syncPolicy:
     automated:
