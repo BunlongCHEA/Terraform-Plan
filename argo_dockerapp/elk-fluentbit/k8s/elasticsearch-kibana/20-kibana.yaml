@@ -1,6 +1,6 @@
-# Replace <registry>/kyc-kibana:latest with your pushed image
+# Replace <registry>/kyc-kibana:latest with pushed image
 # (built from logging/dockerfiles/kibana/Dockerfile)
-# Replace kibana.bunlong.uk with your actual domain (same pattern as
+# Replace kibana.bunlong.uk with actual domain (same pattern as
 # prometheus.bunlong.uk / grafana.bunlong.uk)
 apiVersion: apps/v1
 kind: Deployment

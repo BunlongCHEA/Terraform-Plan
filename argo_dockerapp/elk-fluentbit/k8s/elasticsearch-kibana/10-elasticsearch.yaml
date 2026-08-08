@@ -1,6 +1,6 @@
 # =============================================================
 # Elasticsearch — single node, persistent, internal-only Service
-# Replace <registry>/kyc-elasticsearch:latest with your pushed image
+# Replace <registry>/kyc-elasticsearch:latest with pushed image
 # (built from logging/dockerfiles/elasticsearch/Dockerfile)
 # =============================================================
 apiVersion: apps/v1
@@ -56,10 +56,10 @@ spec:
           resources:
             requests:
               cpu: 250m
-              memory: 768Mi
+              memory: 1Gi # 768Mi
             limits:
               cpu: 1000m
-              memory: 1Gi
+              memory: 2Gi
           volumeMounts:
             - name: es-data
               mountPath: /usr/share/elasticsearch/data
@@ -91,12 +91,14 @@ metadata:
   name: elasticsearch
   namespace: logging
 spec:
+  type: NodePort
   selector:
     app: elasticsearch
   ports:
     - name: http
       port: 9200
       targetPort: 9200
+      nodePort: 30920   # fixed, so the Other Fluent Bit config never has to change
     - name: transport
       port: 9300
       targetPort: 9300

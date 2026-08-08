@@ -10,11 +10,13 @@ spec:
   source:
     repoURL: https://github.com/BunlongCHEA/Terraform-Plan.git
     targetRevision: HEAD
-    path: argo_dockerapp/elk-fluentbit/k8s
+    path: argo_dockerapp/elk-fluentbit/k8s/fluent-bit
     directory:
       recurse: true
   destination:
-    server: https://kubernetes.default.svc
+    # server: https://kubernetes.default.svc
+    # server: https://<desktop-lan-ip>:6443
+    server: ${DEST_SERVER}
     namespace: logging
   syncPolicy:
     automated:

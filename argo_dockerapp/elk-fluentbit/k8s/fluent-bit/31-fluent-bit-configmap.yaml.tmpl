@@ -7,7 +7,7 @@ data:
   fluent-bit.conf: |
     [SERVICE]
         Flush         5
-        Log_Level     info
+        Log_Level     debug
         Daemon        off
         Parsers_File  parsers.conf
         HTTP_Server   On
@@ -40,8 +40,10 @@ data:
     [OUTPUT]
         Name            es
         Match           kube.*
-        Host            elasticsearch.logging.svc
-        Port            9200
+        # Host            elasticsearch.logging.svc
+        # Port            9200
+        Host            ${ES_HOST}
+        Port            ${ES_PORT}
         # One index per namespace per day — makes it trivial in Kibana to
         # filter by namespace, including ones added later.
         Logstash_Format On
