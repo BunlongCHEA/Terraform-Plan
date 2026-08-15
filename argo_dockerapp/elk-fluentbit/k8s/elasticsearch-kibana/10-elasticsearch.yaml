@@ -85,10 +85,30 @@ spec:
           requests:
             storage: 10Gi
 ---
+# Headless Service — required by the StatefulSet's serviceName: elasticsearch.
+# Gives Kibana/Fluent Bit stable in-cluster DNS: elasticsearch.logging.svc
 apiVersion: v1
 kind: Service
 metadata:
   name: elasticsearch
+  namespace: logging
+spec:
+  clusterIP: None
+  selector:
+    app: elasticsearch
+  ports:
+    - name: http
+      port: 9200
+      targetPort: 9200
+    - name: transport
+      port: 9300
+      targetPort: 9300
+---
+# NodePort Service — external access only, matches ES_HOST/ES_PORT in deploy.env
+apiVersion: v1
+kind: Service
+metadata:
+  name: elasticsearch-external
   namespace: logging
 spec:
   type: NodePort
@@ -98,8 +118,4 @@ spec:
     - name: http
       port: 9200
       targetPort: 9200
-      nodePort: 30920   # fixed, so the Other Fluent Bit config never has to change
-    - name: transport
-      port: 9300
-      targetPort: 9300
-  clusterIP: None   # headless, matches StatefulSet; Kibana/Fluent Bit reach it by this DNS name
+      nodePort: 30920   # fixed, so the Fluent Bit config never has to change
