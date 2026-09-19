@@ -9,13 +9,14 @@
   hosts:  all
   become: yes
   gather_facts: yes
-  
+  vars_files:
+  - "{{ playbook_dir }}/../common/versions.yml"
   vars:
     # LazyTrivy version
-    lazytrivy_version: "1.2.9"
+    # lazytrivy_version: "1.2.9"
     
     # Trivy version (underlying scanner)
-    trivy_version: "0.68.2"
+    # trivy_version: "0.68.2"
     
     # Installation paths
     lazytrivy_install_path: "/usr/local/bin/lazytrivy"

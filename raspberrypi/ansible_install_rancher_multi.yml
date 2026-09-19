@@ -10,13 +10,13 @@
   gather_facts: yes
   
   vars:
-    # K3s Version
-    k3s_version: "v1.33.6+k3s1"
+    # # K3s Version
+    # k3s_version: "v1.33.6+k3s1"
     
-    # Rancher Configuration
-    rancher_version: "v2.13.1"
-    cert_manager_version: "1.19.2"
-    helm_version: "v3.19.4"
+    # # Rancher Configuration
+    # rancher_version: "v2.13.1"
+    # cert_manager_version: "1.19.2"
+    # helm_version: "v3.19.4"
     rancher_helm_repository: "https://releases.rancher.com/server-charts/stable"
     
     # Admin password (min 12 characters)

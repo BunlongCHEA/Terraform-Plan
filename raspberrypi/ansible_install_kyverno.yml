@@ -13,11 +13,12 @@
   hosts: os_servers
   become: yes
   gather_facts: yes
-
+  vars_files:
+    - "{{ playbook_dir }}/../common/versions.yml"
   vars:
     kubeconfig_path:   /etc/rancher/k3s/k3s.yaml
     kyverno_namespace: kyverno
-    kyverno_version:   "3.8.0"   # https://github.com/kyverno/kyverno/releases
+    # kyverno_version:   "3.8.0"   # https://github.com/kyverno/kyverno/releases
 
   tasks:
     # ==========================================

@@ -3,6 +3,8 @@
   hosts: os_servers
   become: yes
   gather_facts: yes
+  vars_files:
+    - "{{ playbook_dir }}/../common/versions.yml"
   vars:
     # Map OS family names for conditional installation
     # Ansible uses:  "Debian" for Ubuntu/Debian, "RedHat" for RHEL/CentOS/Rocky/Alma
@@ -83,7 +85,7 @@
     - name: "[Debian/Ubuntu] Install Ansible via pip (fallback)"
       pip:
         name: ansible
-        state:  latest
+        state: "{{ ansible_pip_version }}"   # state: latest
         executable: pip3
       when:  
         - ansible_os_family == supported_debian_family
@@ -128,7 +130,7 @@
     - name: "[RedHat] Install Ansible via pip (fallback)"
       pip:
         name: ansible
-        state: latest
+        state: "{{ ansible_pip_version }}"   # state: latest
         executable: pip3
       when: 
         - ansible_os_family == supported_redhat_family

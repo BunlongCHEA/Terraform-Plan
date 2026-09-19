@@ -93,7 +93,7 @@
     # ==========================================
     - name: Download ArgoCD install manifest
       get_url:
-        url: https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
+        url: https://raw.githubusercontent.com/argoproj/argo-cd/{{ argocd_version }}/manifests/install.yaml
         dest: /tmp/argocd-manifests/install.yaml
         mode: '0644'
       when: inventory_hostname == first_master or is_single_node
