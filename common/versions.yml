@@ -1,29 +1,7 @@
 ---
-# ===========================================
-# common/versions.yml
-# ===========================================
-# Single source of truth for every version installed by ANY playbook in
-# digitalocean/ or gke/ (raspberrypi/ has no kyverno/lazytrivy playbooks,
-# but shares the same rancher/argocd/prometheus playbooks and can load
-# this file too). Loaded via:
-#
-#   vars_files:
-#     - "{{ playbook_dir }}/../common/versions.yml"
-#
-# Change a version here once -- it applies next time that playbook runs,
-# on whichever target you run it against. Values below match exactly
-# what each playbook already hardcodes today, so wiring this in is a
-# no-op on first use -- verify with `ansible-playbook --check` if unsure.
-
 # --- Ansible itself (ansible_install_ansible.yml, pip fallback path only) ---
-# NOT named "ansible_version" -- that name is already used internally by
-# the playbook's own verification task (register: ansible_version), and
-# vars_files would collide with it.
-ansible_pip_version: "latest"   # was hardcoded "state: latest" -- set e.g. "10.*" to pin
-
-# NOTE: Python's own version is NOT pinnable here -- apt/yum install
-# whatever python3 the OS repo ships. Pinning needs deadsnakes (Ubuntu)
-# or an alternate module stream (RHEL) -- a separate change if ever needed.
+ansible_pip_version: "latest"
+python_pip_version: "latest"
 
 # --- K3s + Rancher stack (ansible_install_rancher.yml / _multi.yml) ---
 k3s_version: "v1.37.0+k3s1"
@@ -31,22 +9,18 @@ rancher_version: "v2.15.1"
 cert_manager_version: "1.21.2"
 helm_version: "v4.3.0"
 
-# --- ArgoCD (ansible_install_argocd.yml) ---
-# The playbook currently downloads the "stable" branch manifest (no version
-# pin at all). Introducing this var requires also changing the download URL
-# -- see the diff below. Set to a real tag from:
-# https://github.com/argoproj/argo-cd/releases
+# --- ArgoCD (argocd.yml) ---
 argocd_version: "stable"        # e.g. "v2.13.2" once you want to pin it
 
-# --- Monitoring (ansible_install_prometheus_grafana.yml) ---
+# --- Monitoring (prometheus_grafana.yml) ---
 # Single Helm chart version -- prometheus/grafana/node-exporter/alertmanager
 # versions all come bundled together from this one chart release.
 # https://github.com/prometheus-community/helm-charts/releases
 kube_prometheus_stack_version: "91.5.0"
 
-# --- Kyverno (ansible_install_kyverno.yml) ---
+# --- Kyverno (kyverno.yml) ---
 kyverno_version: "1.19.1"        # https://github.com/kyverno/kyverno/releases
 
-# --- LazyTrivy + Trivy (ansible_install_lazytrivy.yml) ---
-lazytrivy_version: "1.2.9"      # https://github.com/owenrumney/lazytrivy/releases
-trivy_version: "0.74.0"         # https://github.com/aquasecurity/trivy/releases
+# --- LazyTrivy + Trivy (lazytrivy.yml) ---
+# lazytrivy_version: "1.2.9"      # https://github.com/owenrumney/lazytrivy/releases
+# trivy_version: "0.74.0"         # https://github.com/aquasecurity/trivy/releases
