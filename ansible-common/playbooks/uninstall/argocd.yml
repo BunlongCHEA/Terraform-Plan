@@ -1,8 +1,8 @@
 ---
 - name: Uninstall ArgoCD from Kubernetes
   hosts: os_servers
-  become: yes
-  gather_facts: yes
+  become: true
+  gather_facts: false
   vars:
     argocd_namespace: argocd
     kubeconfig_path: /etc/rancher/k3s/k3s.yaml
@@ -26,7 +26,7 @@
       when: 
         - (inventory_hostname == first_master or is_single_node)
         - ns_check.rc == 0
-      ignore_errors: yes
+      ignore_errors: true
 
     - name: Delete ArgoCD namespace
       command: kubectl delete namespace {{ argocd_namespace }} --timeout=120s
@@ -35,7 +35,7 @@
       when: 
         - (inventory_hostname == first_master or is_single_node)
         - ns_check.rc == 0
-      ignore_errors: yes
+      ignore_errors: true
 
     - name: Delete ArgoCD CRDs
       shell: |
@@ -45,7 +45,7 @@
       environment:
         KUBECONFIG: "{{ kubeconfig_path }}"
       when: inventory_hostname == first_master or is_single_node
-      ignore_errors: yes
+      ignore_errors: true
 
     - name: Delete ArgoCD ClusterRoles
       shell: |
@@ -55,7 +55,7 @@
       environment:
         KUBECONFIG: "{{ kubeconfig_path }}"
       when: inventory_hostname == first_master or is_single_node
-      ignore_errors: yes
+      ignore_errors: true
 
     - name: Delete ArgoCD ClusterRoleBindings
       shell: |
@@ -65,7 +65,7 @@
       environment:
         KUBECONFIG: "{{ kubeconfig_path }}"
       when: inventory_hostname == first_master or is_single_node
-      ignore_errors: yes
+      ignore_errors: true
 
     - name: Remove local ArgoCD files
       file:

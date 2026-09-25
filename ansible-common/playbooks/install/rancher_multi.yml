@@ -6,9 +6,10 @@
 
 - name: Install K3s and Rancher Server
   hosts: os_servers
-  become: yes
-  gather_facts: yes
-  
+  become: true
+  gather_facts: false
+  vars_files:
+    - "{{ playbook_dir }}/../../common/versions.yml"
   vars:
     # # K3s Version
     # k3s_version: "v1.33.6+k3s1"
@@ -111,7 +112,7 @@
     - name: Check if K3s is installed
       command: k3s --version
       register: k3s_check
-      ignore_errors:  yes
+      ignore_errors:  true
       changed_when: false
 
     - name: "[FIRST MASTER] Install K3s Server (Initialize Cluster)"
@@ -216,7 +217,7 @@
         state: started
         enabled: yes
       when: is_worker
-      ignore_errors: yes
+      ignore_errors: true
 
     - name: "[ADDITIONAL MASTER] Wait for K3s server to start"
       systemd:
@@ -226,7 +227,7 @@
       when: 
         - is_master
         - inventory_hostname != first_master
-      ignore_errors: yes
+      ignore_errors: true
 
     # ==========================================
     # Configure kubectl (Master Only)
@@ -266,7 +267,7 @@
     - name:  "[MASTER] Check if Helm is installed"
       command: helm version --short
       register: helm_check
-      ignore_errors: yes
+      ignore_errors: true
       changed_when: false
       when: inventory_hostname == first_master
 
@@ -306,7 +307,7 @@
         export KUBECONFIG={{ kubeconfig_path }}
         kubectl get namespace cert-manager
       register: cert_manager_ns
-      ignore_errors: yes
+      ignore_errors: true
       changed_when: false
       when: inventory_hostname == first_master
 
@@ -373,7 +374,7 @@
       register: issuer_ready
       until: issuer_ready.rc == 0
       when: inventory_hostname == first_master
-      ignore_errors: yes
+      ignore_errors: true
 
     # ==========================================
     # Install Rancher Server (Master Only)
@@ -392,7 +393,7 @@
         export KUBECONFIG={{ kubeconfig_path }}
         helm list -n cattle-system | grep -w rancher
       register: rancher_installed
-      ignore_errors: yes
+      ignore_errors: true
       changed_when: false
       when: inventory_hostname == first_master
 
@@ -445,7 +446,7 @@
       register: rancher_ready
       until: rancher_ready.rc == 0
       when: inventory_hostname == first_master
-      ignore_errors: yes
+      ignore_errors: true
 
     # ==========================================
     # Wait for All Nodes (Master Only)
@@ -474,7 +475,7 @@
       register: cert_status
       changed_when: false
       when:  inventory_hostname == first_master
-      ignore_errors: yes
+      ignore_errors: true
 
     - name: "[MASTER] Get ingress status"
       shell: |
@@ -485,7 +486,7 @@
       register: ingress_status
       changed_when: false
       when: inventory_hostname == first_master
-      ignore_errors: yes
+      ignore_errors: true
       
     - name: "[MASTER] Get cluster nodes"
       shell: |
@@ -502,7 +503,7 @@
       register: rancher_pods
       changed_when: false
       when: inventory_hostname == first_master
-      ignore_errors: yes
+      ignore_errors: true
 
     # ==========================================
     # Cleanup (Master Only)
@@ -615,7 +616,7 @@
 
     - name: "[MASTER] Save access information to local machine"
       delegate_to: localhost
-      become: no
+      become: false
       copy:
         dest: ./rancher/rancher-access-info.txt
         content: "{{ rancher_access_info }}"

@@ -1,10 +1,10 @@
 ---
 - name: Deploy ArgoCD on Rancher/K3s Cluster (Fresh Start)
   hosts: os_servers
-  become: yes
-  gather_facts: yes
+  become: true
+  gather_facts: false
   vars_files:
-    - "{{ playbook_dir }}/../common/versions.yml"
+    - "{{ playbook_dir }}/../../common/versions.yml"
   vars: 
     argocd_namespace: argocd
     kubeconfig_path: /etc/rancher/k3s/k3s.yaml
@@ -361,7 +361,7 @@
     #   delay: 20
     #   until: pods_ready_final.rc == 0
     #   when: inventory_hostname == first_master or is_single_node
-    #   ignore_errors: yes
+    #   ignore_errors: true
 
     # ==========================================
     # STEP 9: Configure ArgoCD for Ingress
@@ -391,7 +391,7 @@
       when: 
         - inventory_hostname == first_master or is_single_node
         - insecure_patch.changed
-      ignore_errors: yes
+      ignore_errors: true
 
     # ==========================================
     # STEP 10: Apply ArgoCD Ingress
@@ -631,7 +631,7 @@
 
     - name: Save access information to local machine
       delegate_to: localhost
-      become: no
+      become: false
       copy:
         dest: ./rancher/argocd-access-info.txt
         content: "{{ argocd_access_info }}"

@@ -11,10 +11,10 @@
 
 - name: Install Kyverno via Helm
   hosts: os_servers
-  become: yes
-  gather_facts: yes
+  become: true
+  gather_facts: false
   vars_files:
-    - "{{ playbook_dir }}/../common/versions.yml"
+    - "{{ playbook_dir }}/../../common/versions.yml"
   vars:
     kubeconfig_path:   /etc/rancher/k3s/k3s.yaml
     kyverno_namespace: kyverno
@@ -36,7 +36,7 @@
         KUBECONFIG: "{{ kubeconfig_path }}"
       register: kubectl_check
       changed_when: false
-      ignore_errors: yes
+      ignore_errors: true
 
     - name: Check K3s node is Ready
       shell: |
@@ -82,7 +82,7 @@
       args:
         executable: /bin/bash
       register: kyverno_installed
-      ignore_errors: yes
+      ignore_errors: true
       changed_when: false
 
     # ==========================================
@@ -205,7 +205,7 @@
         helm repo update
       args:
         executable: /bin/bash
-      ignore_errors: yes
+      ignore_errors: true
 
     - name: Check if kyverno-policies is installed
       shell: |
@@ -214,7 +214,7 @@
       args:
         executable: /bin/bash
       register: policies_installed
-      ignore_errors: yes
+      ignore_errors: true
       changed_when: false
 
     - name: Install Kyverno Pod Security Standard policies (Non-Production — Audit)
@@ -275,7 +275,7 @@
         executable: /bin/bash
       register: kyverno_image
       changed_when: false
-      ignore_errors: yes
+      ignore_errors: true
 
     # ==========================================
     # Cleanup
@@ -354,7 +354,7 @@
 
     - name: Save Kyverno info to local machine
       delegate_to: localhost
-      become: no
+      become: false
       copy:
         dest: ./rancher/kyverno-access-info.txt
         content: "{{ kyverno_access_info }}"

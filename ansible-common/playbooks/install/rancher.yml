@@ -12,9 +12,10 @@
 
 - name: Install K3s and Rancher Server
   hosts: os_servers
-  become: yes
-  gather_facts: yes
-  
+  become: true
+  gather_facts: false
+  vars_files:
+    - "{{ playbook_dir }}/../../common/versions.yml"
   vars:
     # # K3s Version (from rancher/quickstart)
     # k3s_version: "v1.33.6+k3s1"
@@ -96,7 +97,7 @@
         name: epel-release
         state: present
       when: ansible_os_family == supported_redhat_family
-      ignore_errors: yes
+      ignore_errors: true
 
     - name: "[RedHat] Install base dependencies"
       yum: 
@@ -117,7 +118,7 @@
     - name: Check if K3s is installed
       command: k3s --version
       register:  k3s_check
-      ignore_errors: yes
+      ignore_errors: true
       changed_when: false
 
     - name: Install K3s
@@ -184,7 +185,7 @@
     - name: Check if Helm is installed
       command: helm version --short
       register: helm_check
-      ignore_errors: yes
+      ignore_errors: true
       changed_when: false
 
     - name: Download Helm install script
@@ -218,7 +219,7 @@
         export KUBECONFIG={{ kubeconfig_path }}
         kubectl get namespace cert-manager
       register: cert_manager_ns
-      ignore_errors: yes
+      ignore_errors: true
       changed_when: false
 
     - name: Install cert-manager
@@ -296,7 +297,7 @@
       delay: 10
       register: issuer_ready
       until: issuer_ready.rc == 0
-      ignore_errors: yes
+      ignore_errors: true
 
     # ==========================================
     # Install Rancher Server
@@ -314,7 +315,7 @@
         export KUBECONFIG={{ kubeconfig_path }}
         helm list -n cattle-system | grep -w rancher
       register: rancher_installed
-      ignore_errors: yes
+      ignore_errors: true
       changed_when: false
 
     # - name: Install Rancher Server
@@ -363,7 +364,7 @@
       delay: 5
       register: rancher_ready
       until: rancher_ready.rc == 0
-      ignore_errors: yes
+      ignore_errors: true
 
     # ==========================================
     # Verify Certificate
@@ -378,7 +379,7 @@
       retries: 10
       delay: 5
       until: "'True' in cert_status.stdout"
-      ignore_errors: yes
+      ignore_errors: true
 
     - name: Check certificate status
       shell: |
@@ -388,7 +389,7 @@
         executable: /bin/bash
       register: cert_details
       changed_when: false
-      ignore_errors: yes
+      ignore_errors: true
 
     # ==========================================
     # Wait for Rancher to be fully operational
@@ -404,7 +405,7 @@
       retries: 3
       delay:  5
       until: rancher_ping.status == 200
-      ignore_errors: yes
+      ignore_errors: true
 
     # ==========================================
     # Cleanup sensitive files
@@ -447,7 +448,7 @@
     #     kubectl get pods -n cattle-system
     #   register: rancher_pods
     #   changed_when: false
-    #   ignore_errors: yes
+    #   ignore_errors: true
 
     # - name: Get certificate status
     #   shell: |
@@ -455,7 +456,7 @@
     #     kubectl get certificate -n cattle-system -o wide
     #   register: cert_status_final
     #   changed_when: false
-    #   ignore_errors: yes
+    #   ignore_errors: true
 
     # - name: Get ingress status
     #   shell: |
@@ -463,7 +464,7 @@
     #     kubectl get ingress -n cattle-system -o wide
     #   register: ingress_status
     #   changed_when:  false
-    #   ignore_errors: yes
+    #   ignore_errors: true
 
     # ==========================================
     # Display Installation Summary
@@ -623,7 +624,7 @@
 
     - name: Save access information to local machine
       delegate_to: localhost
-      become: no
+      become: false
       copy:
         dest: ./rancher/rancher-access-info.txt
         content: "{{ rancher_access_info }}"

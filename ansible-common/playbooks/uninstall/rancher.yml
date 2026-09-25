@@ -1,8 +1,8 @@
 ---
 - name: Uninstall Rancher and K3s
   hosts: os_servers
-  become: yes
-  gather_facts: yes
+  become: true
+  gather_facts: false
   tasks:
     - name: Check if K3s is installed
       stat:
@@ -14,14 +14,14 @@
       when: 
         - k3s_installed.stat.exists
         - "'master' in group_names or groups['os_servers'][0] == inventory_hostname"
-      ignore_errors: yes
+      ignore_errors: true
 
     - name: Run K3s agent uninstall script
       shell: /usr/local/bin/k3s-agent-uninstall.sh
       when: 
         - k3s_installed.stat.exists
         - "'worker' in group_names or groups['os_servers'][0] != inventory_hostname"
-      ignore_errors: yes
+      ignore_errors: true
 
     - name: Remove K3s directories
       file:

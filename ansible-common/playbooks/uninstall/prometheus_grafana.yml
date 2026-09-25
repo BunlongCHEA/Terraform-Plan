@@ -1,8 +1,8 @@
 ---
 - name: Uninstall In-Cluster Prometheus & Grafana Monitoring Stack
   hosts: os_servers
-  become: yes
-  gather_facts: yes
+  become: true
+  gather_facts: false
   vars:
     kubeconfig_path: /etc/rancher/k3s/k3s.yaml
     monitoring_namespace: monitoring
@@ -27,7 +27,7 @@
       environment:
         KUBECONFIG: "{{ kubeconfig_path }}"
       register: helm_check
-      ignore_errors: yes
+      ignore_errors: true
       changed_when: false
 
     - name: Check if release exists
@@ -35,7 +35,7 @@
       environment:
         KUBECONFIG: "{{ kubeconfig_path }}"
       register: helm_releases
-      ignore_errors: yes
+      ignore_errors: true
       changed_when: false
 
     - name: Display current releases
@@ -49,7 +49,7 @@
       shell: kubectl delete ingress --all -n {{ monitoring_namespace }} --timeout=60s
       environment:
         KUBECONFIG: "{{ kubeconfig_path }}"
-      ignore_errors: yes
+      ignore_errors: true
       register: ingress_delete
       changed_when: "'deleted' in ingress_delete.stdout"
 
@@ -64,7 +64,7 @@
       environment:
         KUBECONFIG: "{{ kubeconfig_path }}"
       register: helm_uninstall
-      ignore_errors: yes
+      ignore_errors: true
       changed_when: "'uninstalled' in helm_uninstall.stdout"
 
     - name: Display Helm uninstall output
@@ -84,7 +84,7 @@
       environment:
         KUBECONFIG: "{{ kubeconfig_path }}"
       register: monitoring_crds
-      ignore_errors: yes
+      ignore_errors: true
       changed_when: false
 
     - name: Display CRDs to be removed
@@ -107,7 +107,7 @@
           --timeout=120s
       environment:
         KUBECONFIG: "{{ kubeconfig_path }}"
-      ignore_errors: yes
+      ignore_errors: true
       register: crd_delete
       changed_when: "'deleted' in crd_delete.stdout"
 
@@ -119,7 +119,7 @@
       environment:
         KUBECONFIG: "{{ kubeconfig_path }}"
       register: monitoring_pvcs
-      ignore_errors: yes
+      ignore_errors: true
       changed_when: false
 
     - name: Display PVCs to be removed
@@ -130,7 +130,7 @@
       shell: kubectl delete pvc --all -n {{ monitoring_namespace }} --timeout=120s
       environment:
         KUBECONFIG: "{{ kubeconfig_path }}"
-      ignore_errors: yes
+      ignore_errors: true
       register: pvc_delete
       changed_when: "'deleted' in pvc_delete.stdout"
 
@@ -146,7 +146,7 @@
           --timeout=60s
       environment:
         KUBECONFIG: "{{ kubeconfig_path }}"
-      ignore_errors: yes
+      ignore_errors: true
       register: secret_delete
       changed_when: "'deleted' in secret_delete.stdout"
 
@@ -158,7 +158,7 @@
         kubectl delete all --all -n {{ monitoring_namespace }} --timeout=120s
       environment:
         KUBECONFIG: "{{ kubeconfig_path }}"
-      ignore_errors: yes
+      ignore_errors: true
       register: remaining_delete
       changed_when: "'deleted' in remaining_delete.stdout"
 
@@ -166,13 +166,13 @@
       shell: kubectl delete configmap --all -n {{ monitoring_namespace }} --timeout=60s
       environment:
         KUBECONFIG: "{{ kubeconfig_path }}"
-      ignore_errors: yes
+      ignore_errors: true
 
     - name: Delete Secrets in monitoring namespace
       shell: kubectl delete secret --all -n {{ monitoring_namespace }} --timeout=60s
       environment:
         KUBECONFIG: "{{ kubeconfig_path }}"
-      ignore_errors: yes
+      ignore_errors: true
 
     # ==========================================
     # Delete Namespace
@@ -181,7 +181,7 @@
       command: kubectl delete namespace {{ monitoring_namespace }} --timeout=120s
       environment:
         KUBECONFIG: "{{ kubeconfig_path }}"
-      ignore_errors: yes
+      ignore_errors: true
       register: ns_delete
       changed_when: "'deleted' in ns_delete.stdout"
 
@@ -203,7 +203,7 @@
           kubectl replace --raw "/api/v1/namespaces/{{ monitoring_namespace }}/finalize" -f -
       environment:
         KUBECONFIG: "{{ kubeconfig_path }}"
-      ignore_errors: yes
+      ignore_errors: true
 
     # ==========================================
     # Clean Up Helm Repo (Optional)
@@ -212,7 +212,7 @@
       command: helm repo remove prometheus-community
       environment:
         KUBECONFIG: "{{ kubeconfig_path }}"
-      ignore_errors: yes
+      ignore_errors: true
       register: repo_remove
       changed_when: "'has been removed' in repo_remove.stdout"
 
@@ -226,7 +226,7 @@
 
     - name: Remove access info from local machine
       delegate_to: localhost
-      become: no
+      become: false
       file:
         path: ./rancher/prometheus-grafana-access-info.txt
         state: absent

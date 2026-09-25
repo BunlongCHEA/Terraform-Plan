@@ -1,10 +1,10 @@
 ---
 - name: Install Prometheus & Grafana Monitoring Stack in K3s Cluster
   hosts: os_servers
-  become: yes
-  gather_facts: yes
+  become: true
+  gather_facts: false
   vars_files:
-    - "{{ playbook_dir }}/../common/versions.yml"
+    - "{{ playbook_dir }}/../../common/versions.yml"
   vars:
     kubeconfig_path: /etc/rancher/k3s/k3s.yaml
     monitoring_namespace: monitoring
@@ -55,7 +55,7 @@
     - name: Check if Helm is installed
       command: helm version --short
       register: helm_check
-      ignore_errors: yes
+      ignore_errors: true
       changed_when: false
 
     - name: Install Helm if not present
@@ -594,7 +594,7 @@
 
     - name: Save access info to local machine
       delegate_to: localhost
-      become: no
+      become: false
       copy:
         dest: ./rancher/prometheus-grafana-access-info.txt
         content: "{{ monitoring_access_info }}"
