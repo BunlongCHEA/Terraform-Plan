@@ -26,10 +26,10 @@ ansible_pip_version: "latest"   # was hardcoded "state: latest" -- set e.g. "10.
 # or an alternate module stream (RHEL) -- a separate change if ever needed.
 
 # --- K3s + Rancher stack (ansible_install_rancher.yml / _multi.yml) ---
-k3s_version: "v1.33.6+k3s1"
-rancher_version: "v2.13.1"
-cert_manager_version: "1.19.2"
-helm_version: "v3.19.4"
+k3s_version: "v1.37.0+k3s1"
+rancher_version: "v2.15.1"
+cert_manager_version: "1.21.2"
+helm_version: "v4.3.0"
 
 # --- ArgoCD (ansible_install_argocd.yml) ---
 # The playbook currently downloads the "stable" branch manifest (no version
@@ -42,11 +42,11 @@ argocd_version: "stable"        # e.g. "v2.13.2" once you want to pin it
 # Single Helm chart version -- prometheus/grafana/node-exporter/alertmanager
 # versions all come bundled together from this one chart release.
 # https://github.com/prometheus-community/helm-charts/releases
-kube_prometheus_stack_version: "82.10.3"
+kube_prometheus_stack_version: "91.5.0"
 
 # --- Kyverno (ansible_install_kyverno.yml) ---
-kyverno_version: "3.8.0"        # https://github.com/kyverno/kyverno/releases
+kyverno_version: "1.19.1"        # https://github.com/kyverno/kyverno/releases
 
 # --- LazyTrivy + Trivy (ansible_install_lazytrivy.yml) ---
 lazytrivy_version: "1.2.9"      # https://github.com/owenrumney/lazytrivy/releases
-trivy_version: "0.68.2"         # https://github.com/aquasecurity/trivy/releases
+trivy_version: "0.74.0"         # https://github.com/aquasecurity/trivy/releases

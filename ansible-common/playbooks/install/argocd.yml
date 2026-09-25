@@ -3,6 +3,8 @@
   hosts: os_servers
   become: yes
   gather_facts: yes
+  vars_files:
+    - "{{ playbook_dir }}/../common/versions.yml"
   vars: 
     argocd_namespace: argocd
     kubeconfig_path: /etc/rancher/k3s/k3s.yaml
