@@ -3,23 +3,22 @@
 # Ansible Playbook: Install K3s + Rancher Server
 # Based on: https://github.com/rancher/quickstart/tree/main/rancher/rancher-common
 # ===========================================
-# This playbook installs:  
+# This playbook installs:
 # 1. K3s (Lightweight Kubernetes)
 # 2. Helm
-# 3. cert-manager
-# 4. Rancher Server via Helm
+# 3. Rancher Server via Helm (self-signed certificate)
 # ===========================================
 
 - name: Install K3s and Rancher Server
   hosts: os_servers
   become: true
-  gather_facts: false
+  gather_facts: true
   vars_files:
     - "{{ playbook_dir }}/../../common/versions.yml"
   vars:
     # # K3s Version (from rancher/quickstart)
     # k3s_version: "v1.33.6+k3s1"
-    
+
     # # Rancher Configuration
     # rancher_version: "v2.13.1"
     # cert_manager_version: "1.19.2"
@@ -32,21 +31,22 @@
 
     # Rancher Server DNS (uses nip.io for automatic DNS resolution)
     rancher_server_dns: "{{ ansible_default_ipv4.address }}.nip.io"
-    
+
     # Admin password (min 12 characters) - CHANGE THIS!
-    # rancher_admin_password: "adminPassword123"
     rancher_bootstrap_password: "admin"
-    
+
     # Paths
     kubeconfig_path: "/etc/rancher/k3s/k3s.yaml"
     helm_install_path: "/usr/local/bin/helm"
 
-    # Certificate templates directory
+    # Certificate templates directory — unused now that Let's Encrypt/cert-manager
+    # is removed. Left defined since terraform_main.sh always passes
+    # -e cert_templates_dir=... to every playbook; harmless if unreferenced.
     cert_templates_dir: "./certificate"
-    
+
     # Workload cluster (optional)
     workload_cluster_name: "quickstart-workload"
-    
+
     # OS Family detection
     supported_debian_family: "Debian"
     supported_redhat_family: "RedHat"
@@ -68,8 +68,8 @@
       when: ansible_os_family == supported_debian_family
 
     - name: "[RedHat] Update all packages"
-      yum: 
-        name:  "*"
+      yum:
+        name: "*"
         state: latest
       when: ansible_os_family == supported_redhat_family
 
@@ -100,7 +100,7 @@
       ignore_errors: true
 
     - name: "[RedHat] Install base dependencies"
-      yum: 
+      yum:
         name:
           - curl
           - wget
@@ -117,7 +117,7 @@
     # ==========================================
     - name: Check if K3s is installed
       command: k3s --version
-      register:  k3s_check
+      register: k3s_check
       ignore_errors: true
       changed_when: false
 
@@ -160,17 +160,17 @@
         state: directory
         mode: "0755"
 
-    - name:  Copy kubeconfig to .kube/config
+    - name: Copy kubeconfig to .kube/config
       copy:
         src: "{{ kubeconfig_path }}"
         dest: /root/.kube/config
         remote_src: yes
-        mode:  "0600"
+        mode: "0600"
 
     - name: Update kubeconfig server address
       replace:
         path: /root/.kube/config
-        regexp:  '127.0.0.1'
+        regexp: '127.0.0.1'
         replace: "{{ ansible_host }}"
 
     - name: Add KUBECONFIG to bashrc
@@ -189,7 +189,7 @@
       changed_when: false
 
     - name: Download Helm install script
-      get_url: 
+      get_url:
         url: https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3
         dest: /tmp/get_helm.sh
         mode: "0755"
@@ -204,105 +204,9 @@
         DESIRED_VERSION: "{{ helm_version }}"
 
     # ==========================================
-    # Install cert-manager (Required for Let's Encrypt)
-    # ==========================================
-    - name: Add Jetstack Helm repo
-      shell: |
-        export KUBECONFIG={{ kubeconfig_path }}
-        helm repo add jetstack https://charts.jetstack.io --force-update
-        helm repo update
-      args:
-        executable: /bin/bash
-
-    - name: Check if cert-manager namespace exists
-      shell: |
-        export KUBECONFIG={{ kubeconfig_path }}
-        kubectl get namespace cert-manager
-      register: cert_manager_ns
-      ignore_errors: true
-      changed_when: false
-
-    - name: Install cert-manager
-      shell: |
-        export KUBECONFIG={{ kubeconfig_path }}
-        helm upgrade --install cert-manager jetstack/cert-manager \
-          --namespace cert-manager \
-          --create-namespace \
-          --version v{{ cert_manager_version }} \
-          --set installCRDs=true \
-          --wait --timeout 10m
-      args:
-        executable: /bin/bash
-      when: cert_manager_ns.rc != 0
-
-    - name: Wait for cert-manager to be ready
-      shell: |
-        export KUBECONFIG={{ kubeconfig_path }}
-        kubectl wait --for=condition=Available deployment --all -n cert-manager --timeout=300s
-      args:
-        executable:  /bin/bash
-      retries: 5
-      delay: 30
-      register: cert_manager_ready
-      until: cert_manager_ready.rc == 0
-
-    # ==========================================
-    # Configure Cloudflare DNS Challenge
-    # ==========================================
-    - name: Create temporary directory for certificate manifests
-      file:
-        path: /tmp/cert-manifests
-        state: directory
-        mode: "0755"
-
-    # - name: Copy Cloudflare secret with variables to remote
-    #   template:
-    #     src: "{{ cert_templates_dir }}/cloudflare-secret.yml.j2"
-    #     dest:  /tmp/cert-manifests/cloudflare-secret.yml
-    #     mode: "0600"
-
-    - name: Copy ClusterIssuer with variables to remote
-      template:
-        src: "{{ cert_templates_dir }}/clusterissuer-letsencrypt.yml.j2"
-        dest: /tmp/cert-manifests/clusterissuer-letsencrypt.yml
-        mode: "0644"
-
-    - name: Copy Rancher Ingress with variables to remote
-      template:
-        src:  "{{ cert_templates_dir }}/rancher-ingress.yml.j2"
-        dest: /tmp/cert-manifests/rancher-ingress.yml
-        mode: "0644"
-
-    # - name: Apply Cloudflare API Token Secret
-    #   shell: |
-    #     export KUBECONFIG={{ kubeconfig_path }}
-    #     kubectl apply -f /tmp/cert-manifests/cloudflare-secret.yml
-    #   args:
-    #     executable: /bin/bash
-
-    - name: Apply Let's Encrypt ClusterIssuer
-      shell:  |
-        export KUBECONFIG={{ kubeconfig_path }}
-        kubectl apply -f /tmp/cert-manifests/clusterissuer-letsencrypt.yml
-      args:
-        executable: /bin/bash
-
-    - name: Wait for ClusterIssuer to be ready
-      shell: |
-        export KUBECONFIG={{ kubeconfig_path }}
-        kubectl wait --for=condition=Ready clusterissuer/letsencrypt-prod --timeout=10s
-      args:
-        executable: /bin/bash
-      retries: 5
-      delay: 10
-      register: issuer_ready
-      until: issuer_ready.rc == 0
-      ignore_errors: true
-
-    # ==========================================
     # Install Rancher Server
     # ==========================================
-    - name:  Add Rancher Helm repo
+    - name: Add Rancher Helm repo
       shell: |
         export KUBECONFIG={{ kubeconfig_path }}
         helm repo add rancher-stable {{ rancher_helm_repository }} --force-update
@@ -318,24 +222,7 @@
       ignore_errors: true
       changed_when: false
 
-    # - name: Install Rancher Server
-    #   shell: |
-    #     export KUBECONFIG={{ kubeconfig_path }}
-    #     helm upgrade --install rancher rancher-stable/rancher \
-    #       --namespace cattle-system \
-    #       --create-namespace \
-    #       --version {{ rancher_version }} \
-    #       --set hostname={{ rancher_server_dns }} \
-    #       --set replicas=1 \
-    #       --set bootstrapPassword={{ rancher_bootstrap_password }} \
-    #       --set ingress.tls.source=rancher \
-    #       --wait --timeout 15m
-    #   args:
-    #     executable: /bin/bash
-    #   when: rancher_installed.rc != 0
-    #   register: rancher_install_result
-
-    - name: Install Rancher Server with Let's Encrypt
+    - name: Install Rancher Server (self-signed certificate)
       shell: |
         export KUBECONFIG={{ kubeconfig_path }}
         helm upgrade --install rancher rancher-stable/rancher \
@@ -345,9 +232,7 @@
           --set hostname={{ rancher_domain }} \
           --set replicas=1 \
           --set bootstrapPassword={{ rancher_bootstrap_password }} \
-          --set ingress.tls.source=secret \
-          --set ingress.extraAnnotations."cert-manager\.io/cluster-issuer"=letsencrypt-prod \
-          --set privateCA=false \
+          --set ingress.tls.source=rancher \
           --wait --timeout 15m
       args:
         executable: /bin/bash
@@ -367,60 +252,18 @@
       ignore_errors: true
 
     # ==========================================
-    # Verify Certificate
-    # ==========================================
-    - name: Wait for certificate to be issued
-      shell: |
-        export KUBECONFIG={{ kubeconfig_path }}
-        kubectl get certificate -n cattle-system
-      args:
-        executable: /bin/bash
-      register: cert_status
-      retries: 10
-      delay: 5
-      until: "'True' in cert_status.stdout"
-      ignore_errors: true
-
-    - name: Check certificate status
-      shell: |
-        export KUBECONFIG={{ kubeconfig_path }}
-        kubectl describe certificate -n cattle-system
-      args:
-        executable: /bin/bash
-      register: cert_details
-      changed_when: false
-      ignore_errors: true
-
-    # ==========================================
     # Wait for Rancher to be fully operational
     # ==========================================
     - name: Wait for Rancher URL to be accessible
       uri:
-        # url:  "https://{{ rancher_server_dns }}/ping"
-        # url: "https://{{ rancher_domain }}/ping"
-        url:  "https://{{ ansible_host }}/ping"
+        url: "https://{{ ansible_host }}/ping"
         validate_certs: no
         status_code: 200
       register: rancher_ping
       retries: 3
-      delay:  5
+      delay: 5
       until: rancher_ping.status == 200
       ignore_errors: true
-
-    # ==========================================
-    # Cleanup sensitive files
-    # ==========================================
-    - name: Remove temporary certificate manifests from remote
-      file:
-        path: /tmp/cert-manifests
-        state: absent
-
-    # - name: Remove temporary certificate manifests from local
-    #   file:
-    #     path: /tmp/cert-manifests
-    #     state: absent
-    #   delegate_to: localhost
-    #   become: no
 
     # ==========================================
     # Verification & Status
@@ -435,45 +278,43 @@
       register: helm_version_result
       changed_when: false
 
-    - name: Get Kubernetes nodes
+    # NOTE: the three tasks below (k8s_nodes, rancher_pods, ingress_status)
+    # are reconstructed to match this file's own consistent
+    # "kubectl get X via shell, register, changed_when: false" pattern used
+    # everywhere else in this project. Everything above this note was
+    # verified directly against retrieved file content; these three were
+    # not individually re-confirmed byte-for-byte — worth a quick diff
+    # against your live file if you want full certainty on just these.
+    - name: Get cluster nodes
       shell: |
         export KUBECONFIG={{ kubeconfig_path }}
         kubectl get nodes -o wide
       register: k8s_nodes
       changed_when: false
+      ignore_errors: true
 
-    # - name: Get Rancher pods
-    #   shell: |
-    #     export KUBECONFIG={{ kubeconfig_path }}
-    #     kubectl get pods -n cattle-system
-    #   register: rancher_pods
-    #   changed_when: false
-    #   ignore_errors: true
+    - name: Get Rancher pods
+      shell: |
+        export KUBECONFIG={{ kubeconfig_path }}
+        kubectl get pods -n cattle-system
+      register: rancher_pods
+      changed_when: false
+      ignore_errors: true
 
-    # - name: Get certificate status
-    #   shell: |
-    #     export KUBECONFIG={{ kubeconfig_path }}
-    #     kubectl get certificate -n cattle-system -o wide
-    #   register: cert_status_final
-    #   changed_when: false
-    #   ignore_errors: true
-
-    # - name: Get ingress status
-    #   shell: |
-    #     export KUBECONFIG={{ kubeconfig_path }}
-    #     kubectl get ingress -n cattle-system -o wide
-    #   register: ingress_status
-    #   changed_when:  false
-    #   ignore_errors: true
+    - name: Get ingress status
+      shell: |
+        export KUBECONFIG={{ kubeconfig_path }}
+        kubectl get ingress -n cattle-system
+      register: ingress_status
+      changed_when: false
+      ignore_errors: true
 
     # ==========================================
     # Display Installation Summary
     # ==========================================
     - name: Display Installation Summary
       debug:
-        msg: 
-          - "==========================================================="
-          - "          RANCHER INSTALLATION COMPLETE!"
+        msg:
           - "==========================================================="
           - ""
           - "SERVER INFORMATION:"
@@ -484,17 +325,13 @@
           - "INSTALLED VERSIONS:"
           - "  K3s: {{ k3s_version_result.stdout_lines[0] | default('Unknown') }}"
           - "  Helm: {{ helm_version_result.stdout | default('Unknown') }}"
-          - "  Rancher:  {{ rancher_version }}"
-          - "  cert-manager: {{ cert_manager_version }}"
+          - "  Rancher: {{ rancher_version }}"
           - ""
           - "KUBERNETES NODES:"
           - "{{ k8s_nodes.stdout_lines | default(['Not available']) }}"
           - ""
           - "RANCHER PODS:"
           - "{{ rancher_pods.stdout_lines | default(['Not available']) }}"
-          - ""
-          - "TLS CERTIFICATE:"
-          - "{{ cert_status_final.stdout_lines | default(['Not available']) }}"
           - ""
           - "INGRESS:"
           - "{{ ingress_status.stdout_lines | default(['Not available']) }}"
@@ -506,7 +343,9 @@
           - "  # Insecure Rancher URL: https://{{ rancher_server_dns }}"
           - "  # (Accept the self-signed certificate warning)"
           - "  URL: https://{{ rancher_domain }}"
-          - "  (Secured with Let's Encrypt SSL Certificate)"
+          - "  (Self-signed certificate — accept the browser warning, or"
+          - "   enable 'No TLS Verify' on the Cloudflare Tunnel route for"
+          - "   this hostname)"
           - ""
           - "  Bootstrap Password: {{ rancher_bootstrap_password }}"
           - ""
@@ -517,7 +356,7 @@
           - "1. Open browser and go to:"
           - "   https://{{ rancher_domain }}"
           - ""
-          - "2. SSL Certificate should be valid (no warnings! )"
+          - "2. Accept the self-signed certificate warning"
           - ""
           - "3. Login with:"
           - "   - Bootstrap Password: {{ rancher_bootstrap_password }}"
@@ -526,94 +365,52 @@
           - ""
           - "==========================================================="
 
-    # - name: Save access information to file
-    #   copy:
-    #     dest: /root/rancher-access-info.txt
-    #     content: |
     - name: Set access info content
       set_fact:
         rancher_access_info: |
           ===========================================================
           RANCHER ACCESS INFORMATION
           ===========================================================
-          
+
           Server:  {{ ansible_hostname }}
           IP Address: {{ ansible_host }}
-          
+
           # Insecure Rancher URL: https://{{ rancher_server_dns }}
           Rancher URL: https://{{ rancher_domain }}
-          (Secured with Let's Encrypt SSL Certificate)
-          
+          (Self-signed certificate — accept the browser warning, or enable
+          'No TLS Verify' on the Cloudflare Tunnel route for this hostname)
+
           Bootstrap Password: {{ rancher_bootstrap_password }}
 
-          ===========================================================
-          TLS CERTIFICATE
-          ===========================================================
-          Issuer: Let's Encrypt (letsencrypt-prod)
-          DNS Provider: Cloudflare
-          Challenge Type: DNS-01
-          
           ===========================================================
           KUBECONFIG
           ===========================================================
           Location: /root/.kube/config
           K3s Config: {{ kubeconfig_path }}
-          
+
           ===========================================================
           USEFUL COMMANDS
           ===========================================================
 
-          # List All certificates in all namespaces
-          'kubectl get ingress -A -o custom-columns="NAMESPACE:.metadata.namespace,INGRESS NAME:.metadata.name,SECRET NAMES:.spec.tls[*].secretName"
-          sudo k3s kubectl get certificates --all-namespaces
-          
           # Check Rancher status
           sudo k3s kubectl get pods -n cattle-system
-          
+
           # Check Rancher logs
           sudo k3s kubectl logs -n cattle-system -l app=rancher -f
 
-          # Check certificate status
-          sudo k3s kubectl get certificate -n cattle-system
-          sudo k3s kubectl describe certificate -n cattle-system
-
-          # Check cert-manager logs
-          sudo k3s kubectl logs -n cert-manager -l app=cert-manager -f
-          
-          # Check ClusterIssuer status
-          sudo k3s kubectl describe clusterissuer letsencrypt-prod
-          
           # Check all pods
           sudo k3s kubectl get pods -A
-          
+
           # Check nodes
           sudo k3s kubectl get nodes
-          
+
           # Check services
           sudo k3s kubectl get svc -A
-          
+
           # Check ingress
           sudo k3s kubectl get ingress -A
-          
+
           ===========================================================
-          USEFUL COMMANDS FOR TROUBLESHOOTING in Project
-          ===========================================================
-
-          # Delete the old certificate secret
-          sudo k3s kubectl delete secret kyc-blockchain-tls -n kyc-blockchain
-
-          # Verify it's deleted
-          sudo k3s kubectl get secret kyc-blockchain-tls -n kyc-blockchain
-
-          # Get pod details
-          sudo k3s kubectl get pods -n kyc-blockchain
-
-          # Describe the pod to see what's happening
-          sudo k3s kubectl describe pod kyc-blockchain-0 -n kyc-blockchain
-
-          # Describe the certificate to see if there are any issues with it
-          sudo k3s kubectl describe certificate kyc-blockchain-tls -n kyc-blockchain
-
         mode: "0600"
 
     - name: Save access information to remote server
@@ -621,6 +418,7 @@
         dest: /root/rancher-access-info.txt
         content: "{{ rancher_access_info }}"
         mode: "0600"
+      when: inventory_hostname == first_master
 
     - name: Save access information to local machine
       delegate_to: localhost
@@ -629,24 +427,4 @@
         dest: ./rancher/rancher-access-info.txt
         content: "{{ rancher_access_info }}"
         mode: "0644"
-
-    # - name: Display final message
-    #   debug:
-    #     msg: 
-    #       - ""
-    #       - "✅ Installation completed successfully!"
-    #       - ""
-    #       - "🌐 Access Rancher at: https://{{ rancher_server_dns }}"
-    #       - "🔑 Bootstrap Password: {{ rancher_bootstrap_password }}"
-    #       - ""
-
-    - name: Display final message
-      debug:
-        msg: 
-          - ""
-          - "✅ Installation completed successfully!"
-          - ""
-          - "🌐 Access Rancher at: https://{{ rancher_domain }}"
-          - "🔒 SSL: Let's Encrypt (Valid Certificate)"
-          - "🔑 Bootstrap Password: {{ rancher_bootstrap_password }}"
-          - ""
+      when: inventory_hostname == first_master

@@ -628,6 +628,7 @@
         dest: /root/argocd-access-info.txt
         content: "{{ argocd_access_info }}"
         mode: "0600"
+      when: inventory_hostname == first_master or is_single_node
 
     - name: Save access information to local machine
       delegate_to: localhost
@@ -636,6 +637,7 @@
         dest: ./rancher/argocd-access-info.txt
         content: "{{ argocd_access_info }}"
         mode: "0644"
+      when: inventory_hostname == first_master or is_single_node
 
     # ==========================================
     # Cleanup

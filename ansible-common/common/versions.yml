@@ -10,7 +10,7 @@ cert_manager_version: "1.21.2"
 helm_version: "v4.3.0"
 
 # --- ArgoCD (argocd.yml) ---
-argocd_version: "stable"        # e.g. "v2.13.2" once you want to pin it
+argocd_version: "stable"
 
 # --- Monitoring (prometheus_grafana.yml) ---
 # Single Helm chart version -- prometheus/grafana/node-exporter/alertmanager

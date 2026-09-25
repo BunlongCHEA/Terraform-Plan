@@ -103,9 +103,43 @@ run_playbook() {
   print_success "$name completed"
 }
 
+run_rancher() {
+  require_inventory || return 1
+  resolve_group_vars || return 1
+ 
+  local rancher_single="$P_INSTALL/rancher.yml"
+  local rancher_multi="$P_INSTALL/rancher_multi.yml"
+  local host_count
+  host_count=$(grep -c "ansible_host=" "$INVENTORY" 2>/dev/null || echo "0")
+ 
+  echo "Select installation mode:"
+  echo "  1) Single node (first server only)"
+  echo "  2) Multi-node cluster (all $host_count servers)"
+  read -p "Choice [1-2]: " install_mode
+ 
+  case "$install_mode" in
+    1)
+      if [ ! -f "$rancher_single" ]; then print_error "Playbook not found: $rancher_single"; return 1; fi
+      print_info "Installing Rancher on first server only: $rancher_single"
+      ansible-playbook -i "$INVENTORY" "$rancher_single" --limit "${SERVER}[0]" "${EXTRA_VARS[@]}"
+      ;;
+    2)
+      if [ ! -f "$rancher_multi" ]; then print_error "Playbook not found: $rancher_multi"; return 1; fi
+      print_info "Installing Rancher multi-node cluster (all $host_count servers): $rancher_multi"
+      ansible-playbook -i "$INVENTORY" "$rancher_multi" "${EXTRA_VARS[@]}"
+      ;;
+    *)
+      print_warning "Invalid choice — defaulting to single node"
+      if [ ! -f "$rancher_single" ]; then print_error "Playbook not found: $rancher_single"; return 1; fi
+      ansible-playbook -i "$INVENTORY" "$rancher_single" --limit "${SERVER}[0]" "${EXTRA_VARS[@]}"
+      ;;
+  esac
+  print_success "Rancher installation completed"
+}
+
 # ---- Terraform lifecycle: always executed from inside TARGET_DIR, so
 #      variable.tf / terraform.tfvars / templates/*.tftpl resolve exactly
-#      as they do today. ----
+#      as they do. ----
 tf() { ( cd "$TARGET_DIR" && terraform "$@" ); }
 
 create_directories() {
@@ -119,7 +153,7 @@ terraform_validate() { print_header "terraform validate ($TARGET)"; tf validate;
 terraform_plan()     { print_header "terraform plan ($TARGET)";     tf plan;          print_success "Plan complete"; }
 terraform_apply()    { print_header "terraform apply ($TARGET)";    tf apply -auto-approve; print_success "Apply complete"; }
 terraform_output()   { print_header "terraform output ($TARGET)";   tf output; }
-
+ 
 terraform_destroy() {
   print_header "terraform destroy ($TARGET)"
   print_warning "This will destroy all Terraform-managed resources for $TARGET!"
@@ -134,14 +168,14 @@ terraform_destroy() {
     print_info "Cancelled"
   fi
 }
-
+ 
 test_ansible() {
   print_header "Ansible connectivity test ($TARGET)"
   require_inventory || return 1
   ansible -i "$INVENTORY" "$SERVER" -m ping
   print_success "Connectivity test completed"
 }
-
+ 
 install_menu() {
   echo "Select installation option:"
   echo "  1) Ansible (Python3, pip, Ansible)"
@@ -154,12 +188,12 @@ install_menu() {
   read -p "Enter choice: " c
   case "$c" in
     1) run_playbook "Install Ansible"    "$P_INSTALL/ansible.yml" ;;
-    2) run_playbook "Install Rancher"    "$P_INSTALL/rancher.yml" ;;
+    2) run_rancher ;;
     3) run_playbook "Install ArgoCD"     "$P_INSTALL/argocd.yml" ;;
     4) run_playbook "Install Prometheus" "$P_INSTALL/prometheus_grafana.yml" ;;
     5) run_playbook "Install Kyverno"    "$P_INSTALL/kyverno.yml" ;;
     6) run_playbook "Install Ansible"    "$P_INSTALL/ansible.yml"
-       run_playbook "Install Rancher"    "$P_INSTALL/rancher.yml"
+       run_rancher
        run_playbook "Install ArgoCD"     "$P_INSTALL/argocd.yml"
        run_playbook "Install Prometheus" "$P_INSTALL/prometheus_grafana.yml"
        run_playbook "Install Kyverno"    "$P_INSTALL/kyverno.yml" ;;
@@ -167,7 +201,7 @@ install_menu() {
     *) print_error "Invalid choice" ;;
   esac
 }
-
+ 
 uninstall_menu() {
   print_header "Uninstall Menu ($TARGET)"
   echo "  1) Prometheus & Grafana"
@@ -193,7 +227,7 @@ uninstall_menu() {
     *) print_error "Invalid choice" ;;
   esac
 }
-
+ 
 run_all() {
   create_directories
   terraform_init
@@ -212,11 +246,11 @@ run_all() {
   install_menu
   print_header "Workflow Complete! ($TARGET)"
 }
-
+ 
 show_help() {
   cat <<EOF
 Usage: $0 <target> <command>
-
+ 
   target:  digitalocean | gke | raspberrypi
   command:
     all            Full workflow: init -> apply -> choose installation
@@ -228,34 +262,34 @@ Usage: $0 <target> <command>
     destroy        Destroy target's resources
     test           Ansible connectivity check
     ansible        Install Python3/pip/Ansible on the host
-    rancher        Install K3s + Rancher
+    rancher        Install K3s + Rancher (prompts: single node vs multi-node)
     argocd         Install ArgoCD
     prometheus     Install Prometheus + Grafana
     kyverno        Install Kyverno
     install        Show install menu
     uninstall      Show uninstall menu
     help           Show this help
-
+ 
 Shared assets (used for every target):
   Playbooks:    ansible-common/playbooks/{install,uninstall}/
   ArgoCD:       ansible-common/argocd/
   Certificates: ansible-common/certificate/
-
+ 
 Target-local assets (kept separate per target):
   variable.tf(.example), terraform.tfvars(.example), templates/*.tftpl,
   group_vars/all.yml (real rancher_domain / admin_email for this cluster)
-
+ 
 Examples:
   $0 digitalocean all
   $0 gke rancher
   $0 raspberrypi uninstall
 EOF
 }
-
+ 
 print_header "Terraform-Plan — $TARGET"
 print_info "Target dir: $TARGET_DIR"
 print_info "Shared playbooks: $P_INSTALL"
-
+ 
 case "$COMMAND" in
   all)        run_all ;;
   init)       create_directories; terraform_init ;;
@@ -266,7 +300,7 @@ case "$COMMAND" in
   destroy)    terraform_destroy ;;
   test)       test_ansible ;;
   ansible)    run_playbook "Install Ansible"    "$P_INSTALL/ansible.yml" ;;
-  rancher)    run_playbook "Install Rancher"    "$P_INSTALL/rancher.yml" ;;
+  rancher)    run_rancher ;;
   argocd)     run_playbook "Install ArgoCD"     "$P_INSTALL/argocd.yml" ;;
   prometheus) run_playbook "Install Prometheus" "$P_INSTALL/prometheus_grafana.yml" ;;
   kyverno)    run_playbook "Install Kyverno"    "$P_INSTALL/kyverno.yml" ;;
