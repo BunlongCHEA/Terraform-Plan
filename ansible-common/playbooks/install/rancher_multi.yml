@@ -26,6 +26,8 @@
     # Paths
     kubeconfig_path: "/etc/rancher/k3s/k3s.yaml"
     k3s_token_path: "/var/lib/rancher/k3s/server/node-token"
+    traefik_config_src: "{{ playbook_dir }}/../../common/traefik-config.yaml"
+    traefik_config_dest: "/var/lib/rancher/k3s/server/manifests/traefik-config.yaml"
 
     # Certificate templates directory — unused now that Let's Encrypt/cert-manager
     # is removed. Left defined since terraform_main.sh always passes
@@ -132,28 +134,6 @@
         - k3s_check.rc != 0
         - inventory_hostname == first_master
 
-    # Install K3s Additional Masters (Join Cluster)
-    - name: "[ADDITIONAL MASTER] Install K3s Server (Join Cluster)"
-      shell: |
-        curl -sfL https://get.k3s.io | \
-        INSTALL_K3S_VERSION="{{ k3s_version }}" \
-        K3S_URL="https://{{ first_master_ip }}:6443" \
-        K3S_TOKEN="{{ k3s_cluster_token }}" \
-        INSTALL_K3S_EXEC="server \
-          --node-ip {{ ansible_default_ipv4.address }} \
-          --tls-san {{ ansible_default_ipv4.address }} \
-          --tls-san {{ first_master_ip }} \
-          --tls-san {{ rancher_domain }} \
-          --write-kubeconfig-mode 644" \
-        sh -
-      args:
-        executable: /bin/bash
-        creates: /usr/local/bin/k3s
-      when:
-        - k3s_check.rc != 0
-        - is_master
-        - inventory_hostname != first_master
-
     - name: "[FIRST MASTER] Wait for K3s to be ready"
       wait_for:
         path: "{{ kubeconfig_path }}"
@@ -190,6 +170,28 @@
     - name: Share K3s token across all hosts
       set_fact:
         k3s_cluster_token: "{{ hostvars[first_master]['k3s_token'] }}"
+
+    # Install K3s Additional Masters (Join Cluster)
+    - name: "[ADDITIONAL MASTER] Install K3s Server (Join Cluster)"
+      shell: |
+        curl -sfL https://get.k3s.io | \
+        INSTALL_K3S_VERSION="{{ k3s_version }}" \
+        K3S_URL="https://{{ first_master_ip }}:6443" \
+        K3S_TOKEN="{{ k3s_cluster_token }}" \
+        INSTALL_K3S_EXEC="server \
+          --node-ip {{ ansible_default_ipv4.address }} \
+          --tls-san {{ ansible_default_ipv4.address }} \
+          --tls-san {{ first_master_ip }} \
+          --tls-san {{ rancher_domain }} \
+          --write-kubeconfig-mode 644" \
+        sh -
+      args:
+        executable: /bin/bash
+        creates: /usr/local/bin/k3s
+      when:
+        - k3s_check.rc != 0
+        - is_master
+        - inventory_hostname != first_master
 
     # ==========================================
     # Install K3s Agent (Worker Nodes Only)
@@ -310,7 +312,20 @@
       changed_when: false
       when: inventory_hostname == first_master
 
-    - name: "[MASTER] Install Rancher Server (self-signed certificate)"
+    - name: "[MASTER] Get current Rancher TLS mode"
+      shell: |
+        export KUBECONFIG={{ kubeconfig_path }}
+        helm get values rancher -n cattle-system -o json | jq -r '.tls // "ingress"'
+      args:
+        executable: /bin/bash
+      register: rancher_tls_mode
+      changed_when: false
+      failed_when: false
+      when:
+        - inventory_hostname == first_master
+        - rancher_installed.rc == 0
+
+    - name: "[MASTER] Install Rancher Server (TLS terminated by Cloudflare Tunnel)"
       shell: |
         export KUBECONFIG={{ kubeconfig_path }}
         helm upgrade --install rancher rancher-stable/rancher \
@@ -320,13 +335,13 @@
           --set hostname={{ rancher_domain }} \
           --set replicas=1 \
           --set bootstrapPassword={{ rancher_bootstrap_password }} \
-          --set ingress.tls.source=rancher \
+          --set tls=external \
           --wait --timeout 15m
       args:
         executable: /bin/bash
       when:
         - inventory_hostname == first_master
-        - rancher_installed.rc != 0
+        - rancher_installed.rc != 0 or (rancher_tls_mode.stdout | default('')) != 'external'
       register: rancher_install_result
 
     - name: "[MASTER] Wait for Rancher deployment to be ready"
@@ -339,6 +354,43 @@
       delay: 5
       register: rancher_ready
       until: rancher_ready.rc == 0
+      when: inventory_hostname == first_master
+      ignore_errors: true
+
+    - name: "[MASTER] Apply Traefik config (trust X-Forwarded-* from Cloudflare Tunnel)"
+      copy:
+        src: "{{ traefik_config_src }}"
+        dest: "{{ traefik_config_dest }}"
+        owner: root
+        group: root
+        mode: "0600"
+      register: traefik_config
+      when: inventory_hostname == first_master
+
+    - name: "[MASTER] Wait for Traefik to redeploy with new config"
+      shell: |
+        export KUBECONFIG={{ kubeconfig_path }}
+        sleep 20
+        kubectl -n kube-system rollout status deploy/traefik --timeout=180s
+      args:
+        executable: /bin/bash
+      changed_when: false
+      when:
+        - inventory_hostname == first_master
+        - traefik_config is changed
+
+    - name: "[MASTER] Wait for Rancher to respond via Traefik (localhost)"
+      uri:
+        url: "http://127.0.0.1/ping"
+        headers:
+          Host: "{{ rancher_domain }}"
+          X-Forwarded-Proto: "https"
+        status_code: 200
+        return_content: true
+      register: rancher_ping
+      retries: 20
+      delay: 10
+      until: rancher_ping.status == 200
       when: inventory_hostname == first_master
       ignore_errors: true
 
@@ -404,9 +456,10 @@
           - "==========================================================="
           - ""
           - "  URL: https://{{ rancher_domain }}"
-          - "  (Self-signed certificate — accept the browser warning, or"
-          - "   enable 'No TLS Verify' on the Cloudflare Tunnel route)"
-          - "  # Insecure URL: https://{{ first_master_ip }}"
+          - "  (TLS terminated by Cloudflare — valid certificate, no warning)"
+          - "  Cloudflare Tunnel route: http://localhost:80"
+          - "  Tunnel HTTP Host Header: {{ rancher_domain }}"
+          - "  Rancher /ping via localhost: {{ rancher_ping.content | default('No response') }}"
           - ""
           - "  Master Nodes: {{ master_nodes | join(', ') }}"
           - "  Worker Nodes: {{ worker_nodes | join(', ') if worker_nodes | length > 0 else 'None' }}"
@@ -426,9 +479,9 @@
           Worker Nodes ({{ worker_nodes | length }}): {{ worker_nodes | join(', ') if worker_nodes | length > 0 else 'None' }}
           First Master IP: {{ first_master_ip }}
           Rancher URL: https://{{ rancher_domain }}
-          (Self-signed certificate — accept the browser warning, or enable
-          'No TLS Verify' on the Cloudflare Tunnel route for this hostname)
-          # Insecure URL: https://{{ rancher_server_dns }}
+          (TLS terminated by Cloudflare — valid certificate, no warning)
+          Cloudflare Tunnel route: http://localhost:80
+          Tunnel HTTP Host Header: {{ rancher_domain }}
           Bootstrap Password: {{ rancher_bootstrap_password }}
 
           ===========================================================
@@ -440,14 +493,26 @@
           USEFUL COMMANDS
           ===========================================================
 
-          # Check nodes
-          sudo k3s kubectl get nodes -o wide
+          # Is Traefik itself running?
+          sudo k3s kubectl get pods -n kube-system -o wide | grep -i traefik
 
-          # Check Rancher pods
-          sudo k3s kubectl get pods -n cattle-system
+          # Is the load-balancer DaemonSet (what actually binds 80/443 on each node) up?
+          sudo k3s kubectl get pods -n kube-system -o wide | grep -i svclb
 
-          # Check all pods
-          sudo k3s kubectl get pods -A
+          # What does the Traefik Service look like — LoadBalancer with an EXTERNAL-IP, or stuck Pending?
+          sudo k3s kubectl get svc -n kube-system traefik
+
+          # Is the Rancher pod itself actually Ready (not just Helm reporting success)?
+          sudo k3s kubectl get pods -n cattle-system -o wide
+
+          # Does the Rancher Ingress resource exist and look right?
+          sudo k3s kubectl get ingress -n cattle-system
+
+          # Test Rancher locally (same path Cloudflare Tunnel uses)
+          curl -s -H "Host: {{ rancher_domain }}" http://127.0.0.1/ping
+
+          # Check Traefik config
+          sudo k3s kubectl -n kube-system get helmchartconfig traefik -o yaml
 
           # Get node token (for adding more workers)
           cat /var/lib/rancher/k3s/server/node-token
@@ -471,7 +536,7 @@
       delegate_to: localhost
       become: false
       when: inventory_hostname == first_master
- 
+
     - name: "[MASTER] Save access information to local machine (ansible-common/access-info/)"
       delegate_to: localhost
       become: false

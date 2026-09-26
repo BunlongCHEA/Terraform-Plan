@@ -6,7 +6,7 @@
 # This playbook installs:
 # 1. K3s (Lightweight Kubernetes)
 # 2. Helm
-# 3. Rancher Server via Helm (self-signed certificate)
+# 3. Rancher Server via Helm (TLS terminated by Cloudflare Tunnel)
 # ===========================================
 
 - name: Install K3s and Rancher Server
@@ -38,6 +38,8 @@
     # Paths
     kubeconfig_path: "/etc/rancher/k3s/k3s.yaml"
     helm_install_path: "/usr/local/bin/helm"
+    traefik_config_src: "{{ playbook_dir }}/../../common/traefik-config.yaml"
+    traefik_config_dest: "/var/lib/rancher/k3s/server/manifests/traefik-config.yaml"
 
     # Certificate templates directory — unused now that Let's Encrypt/cert-manager
     # is removed. Left defined since terraform_main.sh always passes
@@ -222,7 +224,18 @@
       ignore_errors: true
       changed_when: false
 
-    - name: Install Rancher Server (self-signed certificate)
+    - name: Get current Rancher TLS mode
+      shell: |
+        export KUBECONFIG={{ kubeconfig_path }}
+        helm get values rancher -n cattle-system -o json | jq -r '.tls // "ingress"'
+      args:
+        executable: /bin/bash
+      register: rancher_tls_mode
+      changed_when: false
+      failed_when: false
+      when: rancher_installed.rc == 0
+
+    - name: Install Rancher Server (TLS terminated by Cloudflare Tunnel)
       shell: |
         export KUBECONFIG={{ kubeconfig_path }}
         helm upgrade --install rancher rancher-stable/rancher \
@@ -232,11 +245,11 @@
           --set hostname={{ rancher_domain }} \
           --set replicas=1 \
           --set bootstrapPassword={{ rancher_bootstrap_password }} \
-          --set ingress.tls.source=rancher \
+          --set tls=external \
           --wait --timeout 15m
       args:
         executable: /bin/bash
-      when: rancher_installed.rc != 0
+      when: rancher_installed.rc != 0 or (rancher_tls_mode.stdout | default('')) != 'external'
       register: rancher_install_result
 
     - name: Wait for Rancher deployment to be ready
@@ -251,17 +264,39 @@
       until: rancher_ready.rc == 0
       ignore_errors: true
 
+    - name: Apply Traefik config (trust X-Forwarded-* from Cloudflare Tunnel)
+      copy:
+        src: "{{ traefik_config_src }}"
+        dest: "{{ traefik_config_dest }}"
+        owner: root
+        group: root
+        mode: "0600"
+      register: traefik_config
+
+    - name: Wait for Traefik to redeploy with new config
+      shell: |
+        export KUBECONFIG={{ kubeconfig_path }}
+        sleep 20
+        kubectl -n kube-system rollout status deploy/traefik --timeout=180s
+      args:
+        executable: /bin/bash
+      changed_when: false
+      when: traefik_config is changed
+
     # ==========================================
     # Wait for Rancher to be fully operational
     # ==========================================
-    - name: Wait for Rancher URL to be accessible
+    - name: Wait for Rancher to respond via Traefik (localhost)
       uri:
-        url: "https://{{ ansible_host }}/ping"
-        validate_certs: no
+        url: "http://127.0.0.1/ping"
+        headers:
+          Host: "{{ rancher_domain }}"
+          X-Forwarded-Proto: "https"
         status_code: 200
+        return_content: true
       register: rancher_ping
-      retries: 3
-      delay: 5
+      retries: 20
+      delay: 10
       until: rancher_ping.status == 200
       ignore_errors: true
 
@@ -340,12 +375,11 @@
           - "          RANCHER ACCESS INFORMATION"
           - "==========================================================="
           - ""
-          - "  # Insecure Rancher URL: https://{{ rancher_server_dns }}"
-          - "  # (Accept the self-signed certificate warning)"
           - "  URL: https://{{ rancher_domain }}"
-          - "  (Self-signed certificate — accept the browser warning, or"
-          - "   enable 'No TLS Verify' on the Cloudflare Tunnel route for"
-          - "   this hostname)"
+          - "  (TLS terminated by Cloudflare — valid certificate, no warning)"
+          - "  Cloudflare Tunnel route: http://localhost:80"
+          - "  Tunnel HTTP Host Header: {{ rancher_domain }}"
+          - "  Rancher /ping via localhost: {{ rancher_ping.content | default('No response') }}"
           - ""
           - "  Bootstrap Password: {{ rancher_bootstrap_password }}"
           - ""
@@ -356,7 +390,7 @@
           - "1. Open browser and go to:"
           - "   https://{{ rancher_domain }}"
           - ""
-          - "2. Accept the self-signed certificate warning"
+          - "2. Cloudflare Tunnel route must point to http://localhost:80"
           - ""
           - "3. Login with:"
           - "   - Bootstrap Password: {{ rancher_bootstrap_password }}"
@@ -375,10 +409,10 @@
           Server:  {{ ansible_hostname }}
           IP Address: {{ ansible_host }}
 
-          # Insecure Rancher URL: https://{{ rancher_server_dns }}
           Rancher URL: https://{{ rancher_domain }}
-          (Self-signed certificate — accept the browser warning, or enable
-          'No TLS Verify' on the Cloudflare Tunnel route for this hostname)
+          (TLS terminated by Cloudflare — valid certificate, no warning)
+          Cloudflare Tunnel route: http://localhost:80
+          Tunnel HTTP Host Header: {{ rancher_domain }}
 
           Bootstrap Password: {{ rancher_bootstrap_password }}
 
@@ -410,6 +444,12 @@
           # Check ingress
           sudo k3s kubectl get ingress -A
 
+          # Test Rancher locally (same path Cloudflare Tunnel uses)
+          curl -s -H "Host: {{ rancher_domain }}" http://127.0.0.1/ping
+
+          # Check Traefik config
+          sudo k3s kubectl -n kube-system get helmchartconfig traefik -o yaml
+
           ===========================================================
         mode: "0600"
 
@@ -428,7 +468,7 @@
       delegate_to: localhost
       become: false
       # when: inventory_hostname == first_master
- 
+
     - name: "Save access information to local machine (ansible-common/access-info/)"
       delegate_to: localhost
       become: false
