@@ -57,14 +57,14 @@
     # ==========================================
     - name: "[Debian/Ubuntu] Update apt cache"
       apt:
-        update_cache: yes
+        update_cache: true
         cache_valid_time: 3600
       when: ansible_os_family == supported_debian_family
 
     - name: "[Debian/Ubuntu] Upgrade all packages"
       apt:
         upgrade: dist
-        autoremove: yes
+        autoremove: true
       when: ansible_os_family == supported_debian_family
 
     - name: "[RedHat] Update all packages"
@@ -164,7 +164,7 @@
       copy:
         src: "{{ kubeconfig_path }}"
         dest: /root/.kube/config
-        remote_src: yes
+        remote_src: true
         mode: "0600"
 
     - name: Update kubeconfig server address
@@ -177,7 +177,7 @@
       lineinfile:
         path: /root/.bashrc
         line: 'export KUBECONFIG=/root/.kube/config'
-        create: yes
+        create: true
 
     # ==========================================
     # Install Helm
@@ -418,13 +418,22 @@
         dest: /root/rancher-access-info.txt
         content: "{{ rancher_access_info }}"
         mode: "0600"
-      when: inventory_hostname == first_master
+      # when: inventory_hostname == first_master
 
-    - name: Save access information to local machine
+    - name: "Ensure local access-info directory exists"
+      file:
+        path: "{{ (playbook_dir ~ '/../../access-info') | realpath }}"
+        state: directory
+        mode: "0755"
+      delegate_to: localhost
+      become: false
+      # when: inventory_hostname == first_master
+ 
+    - name: "Save access information to local machine (ansible-common/access-info/)"
       delegate_to: localhost
       become: false
       copy:
-        dest: ./rancher/rancher-access-info.txt
+        dest: "{{ (playbook_dir ~ '/../../access-info') | realpath }}/{{ inventory_hostname }}-rancher-access-info.txt"
         content: "{{ rancher_access_info }}"
         mode: "0644"
-      when: inventory_hostname == first_master
+      # when: inventory_hostname == first_master

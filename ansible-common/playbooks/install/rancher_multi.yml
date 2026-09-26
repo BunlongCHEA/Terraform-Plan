@@ -73,7 +73,7 @@
     # ==========================================
     - name: "[Debian/Ubuntu] Update apt cache"
       apt:
-        update_cache: yes
+        update_cache: true
         cache_valid_time: 3600
       when: ansible_os_family == supported_debian_family
 
@@ -214,7 +214,7 @@
       systemd:
         name: k3s-agent
         state: started
-        enabled: yes
+        enabled: true
       when: is_worker
       ignore_errors: true
 
@@ -222,7 +222,7 @@
       systemd:
         name: k3s
         state: started
-        enabled: yes
+        enabled: true
       when:
         - is_master
         - inventory_hostname != first_master
@@ -242,7 +242,7 @@
       copy:
         src: "{{ kubeconfig_path }}"
         dest: /root/.kube/config
-        remote_src: yes
+        remote_src: true
         mode: "0600"
       when: inventory_hostname == first_master
 
@@ -257,7 +257,7 @@
       lineinfile:
         path: /root/.bashrc
         line: 'export KUBECONFIG=/root/.kube/config'
-        create: yes
+        create: true
       when: inventory_hostname == first_master
 
     # ==========================================
@@ -345,14 +345,6 @@
     # ==========================================
     # Verification & Status (Master Only)
     # ==========================================
-    # NOTE: the three tasks below (k8s_nodes, ingress_status kept for parity
-    # with rancher.yml — cert_status/issuer checks removed along with
-    # cert-manager) are reconstructed to match this file's own consistent
-    # "kubectl get X via shell, register, changed_when: false, when:
-    # first_master" pattern used everywhere else in this file. Everything
-    # above this note was verified directly against retrieved file content;
-    # these were not individually re-confirmed byte-for-byte — worth a
-    # quick diff against your live file if you want full certainty here.
     - name: "[MASTER] Get cluster nodes"
       shell: |
         export KUBECONFIG={{ kubeconfig_path }}
@@ -471,11 +463,20 @@
         mode: "0600"
       when: inventory_hostname == first_master
 
-    - name: "[MASTER] Save access information to local machine"
+    - name: "[MASTER] Ensure local access-info directory exists"
+      file:
+        path: "{{ (playbook_dir ~ '/../../access-info') | realpath }}"
+        state: directory
+        mode: "0755"
+      delegate_to: localhost
+      become: false
+      when: inventory_hostname == first_master
+ 
+    - name: "[MASTER] Save access information to local machine (ansible-common/access-info/)"
       delegate_to: localhost
       become: false
       copy:
-        dest: ./rancher/rancher-access-info.txt
+        dest: "{{ (playbook_dir ~ '/../../access-info') | realpath }}/{{ inventory_hostname }}-rancher-access-info.txt"
         content: "{{ rancher_access_info }}"
         mode: "0644"
       when: inventory_hostname == first_master
