@@ -1,7 +1,0 @@
----
-# Cloudflare Configuration
-# cloudflare_api_token  : "Nva18t5RIbM6SO9gyHgVbNdUEGcgSlg4BKneEYpo"
-# cloudflare_email      : "chea.bunlong.cloud1@gmail.com"
-rancher_domain        : "rancher1.bunlong.uk"
-admin_email           : "admin@bunlong.uk"
-argocd_domain         : "argocd1.bunlong.uk"
