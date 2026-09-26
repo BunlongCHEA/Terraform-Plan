@@ -2,13 +2,14 @@
 - name: Deploy ArgoCD on Rancher/K3s Cluster (Fresh Start)
   hosts: os_servers
   become: true
-  gather_facts: false
+  gather_facts: true
   vars_files:
     - "{{ playbook_dir }}/../../common/versions.yml"
   vars: 
     argocd_namespace: argocd
     kubeconfig_path: /etc/rancher/k3s/k3s.yaml
     patches_dir: /opt/argocd-patches
+    argocd_patches_src: "{{ playbook_dir }}/../../argocd"
     argocd_config_dir: "./argocd"
     
     # Master node (first host in inventory)
@@ -241,15 +242,15 @@
     # ==========================================
     - name: Copy patch files to remote
       copy:
-        src: "{{ item }}"
-        dest: "{{ patches_dir }}/{{ item | basename }}"
+        src: "{{ argocd_patches_src }}/{{ item }}"
+        dest: "{{ patches_dir }}/{{ item }}"
         mode: '0644'
       loop: 
-        - argocd/argocd-server.json
-        - argocd/argocd-repo-server.json
-        - argocd/argocd-application-controller.json
-        - argocd/argocd-redis.json
-        - argocd/argocd-dex-server.json
+        - argocd-server.json
+        - argocd-repo-server.json
+        - argocd-application-controller.json
+        - argocd-redis.json
+        - argocd-dex-server.json
       when: inventory_hostname == first_master or is_single_node
 
     - name: Apply argocd-server resource patch
@@ -630,11 +631,20 @@
         mode: "0600"
       when: inventory_hostname == first_master or is_single_node
 
-    - name: Save access information to local machine
+    - name: Ensure local access-info directory exists
+      file:
+        path: "{{ (playbook_dir ~ '/../../access-info') | realpath }}"
+        state: directory
+        mode: "0755"
+      delegate_to: localhost
+      become: false
+      when: inventory_hostname == first_master or is_single_node
+
+    - name: "Save access information to local machine (ansible-common/access-info/)"
       delegate_to: localhost
       become: false
       copy:
-        dest: ./rancher/argocd-access-info.txt
+        dest: "{{ (playbook_dir ~ '/../../access-info') | realpath }}/{{ inventory_hostname }}-argocd-access-info.txt"
         content: "{{ argocd_access_info }}"
         mode: "0644"
       when: inventory_hostname == first_master or is_single_node
