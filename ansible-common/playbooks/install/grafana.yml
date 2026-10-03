@@ -1,0 +1,711 @@
+---
+# ======================================================================
+# Grafana + Loki + Alloy  (logs stack) on K3s/Rancher, managed by ArgoCD
+# ======================================================================
+#
+#             MASTER (k3s server)                     WORKER (k3s agent)
+# API/scheduler/datastore, Traefik, CoreDNS     kubelet + containerd + flannel
+# Rancher, ArgoCD, local-path-provisioner
+# ┌─────────────┐                               ┌─────────────┐
+# │ alloy pod   │ reads /var/log/pods (master)  │ alloy pod   │ reads /var/log/pods (worker)
+# └──────┬──────┘                               └──────┬──────┘
+#        └──────────── push over flannel ──────────────┤
+#                                              ┌───────▼──────┐  ┌────────────┐
+#                                              │ loki-0 (STS) │◄─│ grafana    │◄─ Traefik ◄─ Cloudflare
+#                                              │ PVC 10Gi     │  │ PVC 5Gi    │   Ingress    Tunnel
+#                                              └──────────────┘  └────────────┘
+#                                        (if stateful_node: "k8-1")
+#
+# DATA FLOW
+#   [every node] Alloy DaemonSet --tails--> /var/log/pods/*
+#        |  parse (CRI/JSON/regex) + filter + timestamp + labels
+#        +--push--> Loki  (loki.grafana.svc:3100)          [always]
+#        +--remote_write--> Prometheus                      [optional]
+#        +--OTLP--> OTel Collector --> Elasticsearch        [optional]
+#   Grafana --queries--> Loki + Prometheus  (Grafana never receives pushes)
+# ======================================================================
+- name: Install Grafana + Loki + Alloy via ArgoCD
+  hosts: os_servers[0]
+  become: true
+  gather_facts: false
+  vars_files:
+    - "{{ playbook_dir }}/../../common/versions.yml"
+  vars:
+    kubeconfig_path: /etc/rancher/k3s/k3s.yaml
+    argocd_namespace: argocd
+    work_dir: /tmp/grafana-stack
+ 
+    # Own namespace on purpose: uninstall/prometheus_grafana.yml deletes the
+    # whole "monitoring" namespace — that must never wipe Grafana/Loki data.
+    grafana_namespace: grafana
+ 
+    # --- Access ----------------------------------------------------------
+    grafana_domain: "grafana.bunlong.uk"
+    grafana_admin_user: "admin"
+    grafana_admin_password: "admin"      # Change this! (or pass -e / ansible-vault)
+    timezone: "Asia/Phnom_Penh"
+    cluster_name: "k3s-cluster"          # same value as Prometheus externalLabels
+ 
+    # --- Storage / placement ----------------------------------------------
+    storage_class: local-path            # K3s built-in, node-local disk
+    grafana_pvc_size: 5Gi
+    loki_pvc_size: 10Gi
+    loki_retention: 168h                 # 7 days, enforced by Loki compactor
+    # K3s node name to pin Grafana + Loki (the 2 pods with PVCs) to.
+    # ""  = let the scheduler choose (PV then sticks to whichever node it picked)
+    # e.g. "k8-1" = keep stateful data on the worker, master stays lighter.
+    stateful_node: ""
+ 
+    # --- Prometheus (installed by prometheus.yml later) --------------------
+    prometheus_url: "http://kube-prometheus-stack-prometheus.monitoring.svc:9090"
+    grafana_add_prometheus_datasource: true
+ 
+    # --- Alloy optional exporters ------------------------------------------
+    # Prometheus must have remote-write receiver enabled first:
+    #   prometheus.prometheusSpec.enableRemoteWriteReceiver: true
+    alloy_export_prometheus: false
+    # Alloy has NO native Elasticsearch exporter. It sends OTLP to an
+    # OpenTelemetry Collector (contrib/EDOT) that has the elasticsearch exporter.
+    alloy_export_otlp: false
+    alloy_otlp_endpoint: "http://otel-collector.logging.svc:4318"
+    # Namespaces whose logs are dropped before reaching Loki (regex alternation)
+    alloy_drop_namespaces: "kube-node-lease"
+ 
+    # --- Derived (do not edit) ---------------------------------------------
+    loki_push_url: "http://loki.{{ grafana_namespace }}.svc.cluster.local:3100/loki/api/v1/push"
+    loki_query_url: "http://loki.{{ grafana_namespace }}.svc.cluster.local:3100"
+    stateful_node_selector: "{{ {'kubernetes.io/hostname': stateful_node} if (stateful_node | length) > 0 else {} }}"
+ 
+    # =====================================================================
+    # LOKI values  (chart: grafana-community/loki)
+    # =====================================================================
+    loki_values:
+      deploymentMode: Monolithic           # 1 pod does ingest+store+query
+      loki:
+        auth_enabled: false                # single tenant, no X-Scope-OrgID needed
+        commonConfig:
+          replication_factor: 1            # only 1 Loki replica
+        # ---- WHERE LOKI STORES DATA ------------------------------------
+        # chunks  -> /var/loki/chunks   (compressed log lines)
+        # index   -> /var/loki/tsdb-*   (TSDB index, 24h tables)
+        # both live on the PVC "storage-loki-0" (local-path on one node)
+        storage:
+          type: filesystem
+        schemaConfig:
+          configs:
+            - from: "2024-04-01"
+              store: tsdb
+              object_store: filesystem
+              schema: v13
+              index:
+                prefix: loki_index_
+                period: 24h
+        ingester:
+          chunk_encoding: snappy
+        limits_config:
+          retention_period: "{{ loki_retention }}"
+          reject_old_samples: true
+          reject_old_samples_max_age: 168h
+          ingestion_rate_mb: 8
+          ingestion_burst_size_mb: 16
+          allow_structured_metadata: true  # trace_id etc. without label cardinality
+          discover_log_levels: true        # adds detected_level for Logs Drilldown
+          volume_enabled: true
+        compactor:                         # deletes data older than retention
+          working_directory: /var/loki/compactor
+          retention_enabled: true
+          delete_request_store: filesystem
+        pattern_ingester:
+          enabled: true                    # Grafana "Logs Drilldown" patterns
+      singleBinary:
+        replicas: 1                        # chart default is 0 — must be set
+        persistence:
+          enabled: true
+          storageClass: "{{ storage_class }}"
+          size: "{{ loki_pvc_size }}"
+        nodeSelector: "{{ stateful_node_selector }}"
+        resources:
+          requests: {cpu: 100m, memory: 256Mi}
+          limits:   {cpu: "1", memory: 1Gi}
+        extraEnv:
+          - name: GOMEMLIMIT
+            value: 900MiB
+      # Not needed for a 2-node lab (each would add pods/RAM)
+      gateway: {enabled: false}
+      chunksCache: {enabled: false}        # default asks for ~8 GiB RAM
+      resultsCache: {enabled: false}
+      lokiCanary: {enabled: false}
+      test: {enabled: false}
+      minio: {enabled: false}
+      # Zero out the other deployment modes
+      backend: {replicas: 0}
+      read: {replicas: 0}
+      write: {replicas: 0}
+      ingester: {replicas: 0}
+      querier: {replicas: 0}
+      queryFrontend: {replicas: 0}
+      queryScheduler: {replicas: 0}
+      distributor: {replicas: 0}
+      compactor: {replicas: 0}
+      indexGateway: {replicas: 0}
+      bloomPlanner: {replicas: 0}
+      bloomBuilder: {replicas: 0}
+      bloomGateway: {replicas: 0}
+ 
+    # =====================================================================
+    # ALLOY pipeline  (Alloy config language, validated against v1.20.1)
+    # =====================================================================
+    alloy_config: |
+      // =================================================================
+      // PART 1 - COLLECT: pods on THIS node only (DaemonSet = 1 per node)
+      // =================================================================
+      discovery.kubernetes "pods" {
+        role = "pod"
+        selectors {
+          role  = "pod"
+          field = "spec.nodeName=" + sys.env("HOSTNAME")
+        }
+      }
+ 
+      // Turn k8s metadata into Loki labels (keep these LOW cardinality)
+      discovery.relabel "pod_logs" {
+        targets = discovery.kubernetes.pods.targets
+        rule {
+          source_labels = ["__meta_kubernetes_namespace"]
+          target_label  = "namespace"
+        }
+        rule {
+          source_labels = ["__meta_kubernetes_pod_name"]
+          target_label  = "pod"
+        }
+        rule {
+          source_labels = ["__meta_kubernetes_pod_container_name"]
+          target_label  = "container"
+        }
+        rule {
+          source_labels = ["__meta_kubernetes_pod_node_name"]
+          target_label  = "node"
+        }
+        rule {
+          source_labels = ["__meta_kubernetes_pod_label_app_kubernetes_io_name", "__meta_kubernetes_pod_label_app"]
+          separator     = ";"
+          regex         = `^;*([^;]+)(;.*)?$`
+          target_label  = "app"
+        }
+        // /var/log/pods/<ns>_<pod>_<uid>/<container>/0.log
+        rule {
+          source_labels = ["__meta_kubernetes_pod_uid", "__meta_kubernetes_pod_container_name"]
+          separator     = "/"
+          target_label  = "__path__"
+          replacement   = "/var/log/pods/*$1/*.log"
+        }
+      }
+ 
+      local.file_match "pod_logs" {
+        path_targets = discovery.relabel.pod_logs.output
+      }
+ 
+      loki.source.file "pod_logs" {
+        targets    = local.file_match.pod_logs.targets
+        forward_to = [loki.process.pod_logs.receiver]
+      }
+ 
+      // =================================================================
+      // PART 2 - PROCESS: parse / timestamp / filter / aggregate
+      // =================================================================
+      loki.process "pod_logs" {
+        // 2a. PARSE runtime wrapper. K3s uses containerd (CRI format):
+        //     "2026-10-03T08:00:00.123456789Z stdout F <message>"
+        //     -> timestamp = CRI time, line = <message>, label stream
+        stage.cri {}
+ 
+        // 2b. FILTER - each stage.drop is OR'ed with the others
+        stage.drop {
+          older_than          = "1h"
+          drop_counter_reason = "too_old"
+        }
+        stage.drop {
+          longer_than         = "64KB"
+          drop_counter_reason = "too_long"
+        }
+        stage.drop {
+          expression          = `(?i)"?(GET|HEAD) /(healthz|readyz|livez|ping|metrics)`
+          drop_counter_reason = "healthcheck"
+        }
+        stage.match {
+          selector            = `{namespace=~"{{ alloy_drop_namespaces }}"}`
+          action              = "drop"
+          drop_counter_reason = "drop_namespace"
+        }
+ 
+        // 2c. PARSE JSON app logs (lines starting with "{")
+        stage.match {
+          selector = `{namespace=~".+"} |~ "^\\s*\\{"`
+ 
+          stage.json {
+            expressions = {
+              level    = "level",
+              msg      = "msg",
+              app_time = "time",
+              trace_id = "trace_id",
+            }
+          }
+ 
+          // 2d. TIMESTAMP - use the app's own time if present,
+          //     otherwise keep the CRI time from 2a ("skip")
+          stage.timestamp {
+            source            = "app_time"
+            format            = "RFC3339Nano"
+            fallback_formats  = ["RFC3339", "2006-01-02 15:04:05.000", "2006-01-02 15:04:05", "UnixMs"]
+            location          = "{{ timezone }}"
+            action_on_failure = "skip"
+          }
+ 
+          // high-cardinality values -> structured metadata, NOT labels
+          stage.structured_metadata {
+            values = { trace_id = "" }
+          }
+        }
+ 
+        // 2e. PARSE plain-text logs: first level-looking word
+        stage.match {
+          selector = `{namespace=~".+"} !~ "^\\s*\\{"`
+ 
+          stage.regex {
+            expression = `(?i)\b(?P<level>trace|debug|info|warn|warning|error|fatal|panic)\b`
+          }
+        }
+ 
+        stage.labels {
+          values = { level = "" }
+        }
+ 
+        // 2f. AGGREGATE - counter exposed on Alloy :12345/metrics as
+        //     loki_process_custom_log_lines_total{namespace,app,level,...}
+        stage.metrics {
+          metric.counter {
+            name        = "log_lines_total"
+            description = "Log lines shipped by Alloy"
+            match_all   = true
+            action      = "inc"
+          }
+        }
+ 
+        forward_to = [
+          loki.write.loki.receiver,
+      {% if alloy_export_otlp | bool %}
+          otelcol.receiver.loki.to_otlp.receiver,
+      {% endif %}
+        ]
+      }
+ 
+      // =================================================================
+      // PART 3 - EXPORT
+      // =================================================================
+      // 3a. -> Loki (Grafana reads it from here)
+      loki.write "loki" {
+        endpoint {
+          url = "{{ loki_push_url }}"
+        }
+        external_labels = { cluster = "{{ cluster_name }}" }
+      }
+      {% if alloy_export_prometheus | bool %}
+ 
+      // 3b. -> Prometheus (remote_write push of Alloy's own metrics,
+      //        incl. the log_lines_total counter from 2f)
+      prometheus.exporter.self "alloy" {}
+ 
+      prometheus.scrape "alloy_self" {
+        targets         = prometheus.exporter.self.alloy.targets
+        scrape_interval = "30s"
+        forward_to      = [prometheus.remote_write.prometheus.receiver]
+      }
+ 
+      prometheus.remote_write "prometheus" {
+        endpoint {
+          url = "{{ prometheus_url }}/api/v1/write"
+        }
+        external_labels = { cluster = "{{ cluster_name }}" }
+      }
+      {% endif %}
+      {% if alloy_export_otlp | bool %}
+ 
+      // 3c. -> Elasticsearch, via an OTel Collector (elasticsearch exporter)
+      otelcol.receiver.loki "to_otlp" {
+        output {
+          logs = [otelcol.exporter.otlphttp.es_gateway.input]
+        }
+      }
+ 
+      otelcol.exporter.otlphttp "es_gateway" {
+        client {
+          endpoint = "{{ alloy_otlp_endpoint }}"
+        }
+      }
+      {% endif %}
+ 
+    # =====================================================================
+    # ALLOY values  (chart: grafana/alloy)
+    # =====================================================================
+    alloy_values:
+      controller:
+        type: daemonset                    # 1 pod on master + 1 pod on worker
+        tolerations:
+          - operator: Exists               # also run on tainted control-plane nodes
+      alloy:
+        mounts:
+          varlog: true                     # hostPath /var/log (read-only)
+        configMap:
+          create: true
+          content: "{{ alloy_config }}"
+        resources:
+          requests: {cpu: 50m, memory: 128Mi}
+          limits:   {cpu: 500m, memory: 512Mi}
+ 
+    # =====================================================================
+    # GRAFANA values  (chart: grafana-community/grafana)
+    # =====================================================================
+    grafana_datasources_list: >-
+      {{ [{'name': 'Loki', 'type': 'loki', 'uid': 'loki', 'access': 'proxy',
+           'url': loki_query_url, 'isDefault': not (grafana_add_prometheus_datasource | bool),
+           'jsonData': {'maxLines': 1000, 'timeout': 60}}]
+         + ([{'name': 'Prometheus', 'type': 'prometheus', 'uid': 'prometheus',
+              'access': 'proxy', 'url': prometheus_url, 'isDefault': true}]
+            if (grafana_add_prometheus_datasource | bool) else []) }}
+ 
+    grafana_values:
+      admin:
+        existingSecret: grafana-admin      # created by this playbook (stable password)
+        userKey: admin-user
+        passwordKey: admin-password
+      persistence:
+        enabled: true
+        type: pvc
+        storageClassName: "{{ storage_class }}"
+        size: "{{ grafana_pvc_size }}"
+        lookupVolumeName: false            # helm lookup() is empty under ArgoCD
+      nodeSelector: "{{ stateful_node_selector }}"
+      testFramework:
+        enabled: false
+      resources:
+        requests: {cpu: 100m, memory: 256Mi}
+        limits:   {cpu: 500m, memory: 512Mi}
+      ingress:
+        enabled: true
+        ingressClassName: traefik
+        annotations:
+          traefik.ingress.kubernetes.io/router.entrypoints: web
+        hosts:
+          - "{{ grafana_domain }}"
+        path: /
+        pathType: Prefix
+      grafana.ini:
+        server:
+          domain: "{{ grafana_domain }}"
+          root_url: "https://{{ grafana_domain }}"
+        date_formats:
+          default_timezone: "{{ timezone }}"
+        auth.anonymous:
+          enabled: false
+        analytics:
+          check_for_updates: false
+          reporting_enabled: false
+      datasources:
+        datasources.yaml:
+          apiVersion: 1
+          datasources: "{{ grafana_datasources_list }}"
+ 
+    # =====================================================================
+    # ArgoCD Applications (order = install order)
+    # =====================================================================
+    grafana_stack_apps:
+      - name: loki
+        repo: https://grafana-community.github.io/helm-charts
+        chart: loki
+        version: "{{ loki_chart_version }}"
+        values: "{{ loki_values }}"
+      - name: alloy
+        repo: https://grafana.github.io/helm-charts
+        chart: alloy
+        version: "{{ alloy_chart_version }}"
+        values: "{{ alloy_values }}"
+      - name: grafana
+        repo: https://grafana-community.github.io/helm-charts
+        chart: grafana
+        version: "{{ grafana_chart_version }}"
+        values: "{{ grafana_values }}"
+ 
+  tasks:
+    # ==========================================
+    # Display Info
+    # ==========================================
+    - name: Display installation information
+      debug:
+        msg:
+          - "=========================================="
+          - "Installing Grafana + Loki + Alloy (via ArgoCD)"
+          - "=========================================="
+          - "Grafana chart: {{ grafana_chart_version }}"
+          - "Loki chart:    {{ loki_chart_version }}"
+          - "Alloy chart:   {{ alloy_chart_version }} (image = chart default appVersion)"
+          - "Namespace:     {{ grafana_namespace }}"
+          - "Grafana URL:   https://{{ grafana_domain }}"
+          - "Pinned node:   {{ stateful_node if stateful_node else '(scheduler decides)' }}"
+          - "=========================================="
+ 
+    # ==========================================
+    # Prerequisites
+    # ==========================================
+    - name: Check if K3s is running
+      command: kubectl cluster-info
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: cluster_info
+      changed_when: false
+ 
+    - name: Check ArgoCD Application CRD exists
+      command: kubectl get crd applications.argoproj.io
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: argocd_crd
+      changed_when: false
+      failed_when: false
+ 
+    - name: Fail if ArgoCD is not installed
+      fail:
+        msg: "ArgoCD not found. Run the ArgoCD install (option 3) first."
+      when: argocd_crd.rc != 0
+ 
+    - name: Get cluster nodes
+      command: kubectl get nodes -o wide
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: cluster_nodes
+      changed_when: false
+ 
+    - name: Display cluster nodes
+      debug:
+        var: cluster_nodes.stdout_lines
+ 
+    - name: Verify pinned node exists
+      command: kubectl get node {{ stateful_node }}
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: false
+      when: stateful_node | length > 0
+ 
+    # ==========================================
+    # Namespace + Grafana admin Secret
+    # ==========================================
+    - name: Apply grafana namespace
+      shell: |
+        kubectl create namespace {{ grafana_namespace }} --dry-run=client -o yaml | kubectl apply -f -
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: ns_result
+      changed_when: "'created' in ns_result.stdout"
+ 
+    # Created outside Helm so ArgoCD never regenerates a random password
+    - name: Apply Grafana admin Secret
+      shell: |
+        kubectl create secret generic grafana-admin \
+          --namespace {{ grafana_namespace }} \
+          --from-literal=admin-user='{{ grafana_admin_user }}' \
+          --from-literal=admin-password='{{ grafana_admin_password }}' \
+          --dry-run=client -o yaml | kubectl apply -f -
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: secret_result
+      changed_when: "'created' in secret_result.stdout or 'configured' in secret_result.stdout"
+      no_log: true
+ 
+    # ==========================================
+    # Render + Apply ArgoCD Applications
+    # ==========================================
+    - name: Create work directory
+      file:
+        path: "{{ work_dir }}"
+        state: directory
+        mode: "0755"
+      tags: [render]
+ 
+    - name: Render ArgoCD Application manifests
+      copy:
+        dest: "{{ work_dir }}/{{ item.name }}-application.yaml"
+        mode: "0644"
+        content: "{{ app_manifest | to_nice_yaml(indent=2, width=4096) }}"
+      vars:
+        app_manifest:
+          apiVersion: argoproj.io/v1alpha1
+          kind: Application
+          metadata:
+            name: "{{ item.name }}"
+            namespace: "{{ argocd_namespace }}"
+            labels:
+              stack: grafana
+            # Deleting the Application also deletes its k8s resources
+            finalizers:
+              - resources-finalizer.argocd.argoproj.io
+          spec:
+            project: default
+            source:
+              repoURL: "{{ item.repo }}"
+              chart: "{{ item.chart }}"
+              targetRevision: "{{ item.version }}"
+              helm:
+                releaseName: "{{ item.name }}"
+                valuesObject: "{{ item['values'] }}"
+            destination:
+              server: https://kubernetes.default.svc
+              namespace: "{{ grafana_namespace }}"
+            syncPolicy:
+              automated:
+                prune: true
+                selfHeal: true
+              syncOptions:
+                - CreateNamespace=true
+                - ServerSideApply=true
+      loop: "{{ grafana_stack_apps }}"
+      loop_control:
+        label: "{{ item.name }}"
+      tags: [render]
+ 
+    - name: Apply ArgoCD Applications
+      command: kubectl apply -f {{ work_dir }}/{{ item.name }}-application.yaml
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      loop: "{{ grafana_stack_apps }}"
+      loop_control:
+        label: "{{ item.name }}"
+      register: app_apply
+      changed_when: "'created' in app_apply.stdout or 'configured' in app_apply.stdout"
+ 
+    # ==========================================
+    # Wait & Verify
+    # ==========================================
+    - name: Wait for Applications to be Synced + Healthy
+      command: >
+        kubectl get application {{ item.name }} -n {{ argocd_namespace }}
+        -o jsonpath='{.status.sync.status}/{.status.health.status}'
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      loop: "{{ grafana_stack_apps }}"
+      loop_control:
+        label: "{{ item.name }}"
+      register: app_status
+      until: app_status.stdout == "Synced/Healthy"
+      retries: 40
+      delay: 15
+      changed_when: false
+ 
+    - name: Get pods with node placement
+      command: kubectl get pods -n {{ grafana_namespace }} -o wide
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: stack_pods
+      changed_when: false
+ 
+    - name: Display pods
+      debug:
+        var: stack_pods.stdout_lines
+ 
+    - name: Get PVCs
+      command: kubectl get pvc -n {{ grafana_namespace }}
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: stack_pvcs
+      changed_when: false
+ 
+    - name: Display PVCs
+      debug:
+        var: stack_pvcs.stdout_lines
+ 
+    - name: Get ArgoCD Applications
+      command: kubectl get applications -n {{ argocd_namespace }} -l stack=grafana
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: argo_apps
+      changed_when: false
+ 
+    - name: Display ArgoCD Applications
+      debug:
+        var: argo_apps.stdout_lines
+ 
+    # ==========================================
+    # Cleanup
+    # ==========================================
+    - name: Remove work directory
+      file:
+        path: "{{ work_dir }}"
+        state: absent
+ 
+    # ==========================================
+    # Summary
+    # ==========================================
+    - name: Set access info
+      set_fact:
+        grafana_access_info: |
+          ==========================================
+            Grafana + Loki + Alloy Installed (ArgoCD)
+          ==========================================
+ 
+          GRAFANA
+            URL:      https://{{ grafana_domain }}
+            Internal: http://grafana.{{ grafana_namespace }}.svc:80
+            Username: {{ grafana_admin_user }}
+            Password: kubectl get secret grafana-admin -n {{ grafana_namespace }} -o jsonpath='{.data.admin-password}' | base64 -d
+ 
+          LOKI (no UI - query through Grafana > Explore / Drilldown > Logs)
+            Push:     {{ loki_push_url }}
+            Query:    {{ loki_query_url }}
+            Retention:{{ loki_retention }}
+ 
+          ALLOY (DaemonSet, 1 pod per node)
+            UI:       kubectl port-forward ds/alloy 12345:12345 -n {{ grafana_namespace }}
+                      then http://localhost:12345  (live pipeline graph)
+            -> Prometheus remote_write: {{ alloy_export_prometheus }}
+            -> OTLP (Elasticsearch):    {{ alloy_export_otlp }}
+ 
+          ARGOCD
+            Apps:     loki, alloy, grafana  (label stack=grafana)
+            kubectl get applications -n {{ argocd_namespace }} -l stack=grafana
+ 
+          ==========================================
+            Verify Commands:
+          ==========================================
+          sudo k3s kubectl get pods -n {{ grafana_namespace }} -o wide
+          sudo k3s kubectl get pvc  -n {{ grafana_namespace }}
+          sudo k3s kubectl logs -n {{ grafana_namespace }} ds/alloy --tail=50
+          sudo k3s kubectl port-forward svc/loki 3100:3100 -n {{ grafana_namespace }}
+          curl -s 'http://localhost:3100/loki/api/v1/labels'
+ 
+          DNS / Cloudflare Tunnel: {{ grafana_domain }} -> Traefik (port 80)
+          ==========================================
+ 
+    - name: Display installation summary
+      debug:
+        msg: "{{ grafana_access_info.split('\n') }}"
+ 
+    # - name: Save access info to local machine
+    #   delegate_to: localhost
+    #   become: false
+    #   copy:
+    #     dest: ./rancher/grafana-access-info.txt
+    #     content: "{{ grafana_access_info }}"
+    #     mode: "0644"
+
+    - name: Ensure local access-info directory exists
+      file:
+        path: "{{ (playbook_dir ~ '/../../access-info') | realpath }}"
+        state: directory
+        mode: "0755"
+      delegate_to: localhost
+      become: false
+
+    - name: "Save access information to local machine (ansible-common/access-info/)"
+      delegate_to: localhost
+      become: false
+      copy:
+        dest: "{{ (playbook_dir ~ '/../../access-info') | realpath }}/{{ inventory_hostname }}-grafana-access-info.txt"
+        content: "{{ grafana_access_info }}"
+        mode: "0644"

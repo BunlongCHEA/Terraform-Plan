@@ -18,6 +18,15 @@ argocd_version: "stable"
 # https://github.com/prometheus-community/helm-charts/releases
 kube_prometheus_stack_version: "91.5.0"
 
+# --- Grafana : grafana-community (grafana.yml) ---
+# https://github.com/grafana-community/helm-charts/releases  (tag grafana-x.y.z)
+grafana_chart_version: "13.2.7"
+# https://github.com/grafana-community/helm-charts/releases  (tag loki-x.y.z)
+loki_chart_version: "18.13.7"
+# Alloy chart still lives in grafana/helm-charts
+# https://github.com/grafana/helm-charts/releases            (tag alloy-x.y.z)
+alloy_chart_version: "1.13.0"
+
 # --- Kyverno (kyverno.yml) ---
 kyverno_version: "1.19.1"        # https://github.com/kyverno/kyverno/releases
 

@@ -1,0 +1,76 @@
+---
+# Removes the Grafana + Loki + Alloy ArgoCD Applications and all their data.
+# Deleting an Application cascades (resources-finalizer.argocd.argoproj.io),
+# but StatefulSet PVCs (Loki) are never owned by Helm, so they are removed here.
+- name: Uninstall Grafana + Loki + Alloy (ArgoCD)
+  hosts: os_servers[0]
+  become: true
+  gather_facts: false
+  vars:
+    kubeconfig_path: /etc/rancher/k3s/k3s.yaml
+    argocd_namespace: argocd
+    grafana_namespace: grafana
+
+  tasks:
+    - name: Delete ArgoCD Applications (cascade delete of k8s resources)
+      command: >
+        kubectl delete applications -n {{ argocd_namespace }}
+        -l stack=grafana --wait=true --timeout=300s
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: app_delete
+      changed_when: "'deleted' in app_delete.stdout"
+      failed_when: false
+
+    - name: Display Application delete output
+      debug:
+        var: app_delete.stdout_lines
+
+    - name: Delete PVCs (Grafana + Loki data)
+      command: kubectl delete pvc --all -n {{ grafana_namespace }} --timeout=120s
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: pvc_delete
+      changed_when: "'deleted' in pvc_delete.stdout"
+      failed_when: false
+
+    - name: Delete grafana namespace
+      command: kubectl delete namespace {{ grafana_namespace }} --timeout=120s
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: ns_delete
+      changed_when: "'deleted' in ns_delete.stdout"
+      failed_when: false
+
+    - name: Delete Alloy CRD (PodLogs)
+      command: kubectl delete crd podlogs.monitoring.grafana.com --timeout=60s
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: crd_delete
+      changed_when: "'deleted' in crd_delete.stdout"
+      failed_when: false
+
+    - name: Remove access info from local machine
+      delegate_to: localhost
+      become: false
+      file:
+        path: ./rancher/grafana-access-info.txt
+        state: absent
+
+    - name: Verify nothing is left
+      shell: |
+        kubectl get applications -n {{ argocd_namespace }} -l stack=grafana 2>&1
+        kubectl get namespace {{ grafana_namespace }} 2>&1 || true
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: verify
+      changed_when: false
+
+    - name: Display uninstall summary
+      debug:
+        msg:
+          - "=========================================="
+          - "  Grafana + Loki + Alloy Uninstalled"
+          - "=========================================="
+          - "{{ verify.stdout_lines }}"
+          - "Manual: remove grafana.bunlong.uk from DNS / Cloudflare Tunnel if unused"

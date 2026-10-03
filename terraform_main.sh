@@ -4,7 +4,7 @@
 #
 #   target:  digitalocean | gke | raspberrypi
 #   command: all | init | validate | plan | apply | output | destroy | test |
-#            ansible | rancher | argocd | prometheus | kyverno |
+#            ansible | rancher | argocd | prometheus | grafana | kyverno |
 #            install | uninstall | help
 #
 # Examples:
@@ -33,8 +33,8 @@ case "$TARGET" in
     cat <<EOF
 Usage: $0 <target> <command>
   target:  digitalocean | gke | raspberrypi
-  command: all | init | validate | plan | apply | output | destroy | test |
-           ansible | rancher | argocd | prometheus | kyverno |
+    command: all | init | validate | plan | apply | output | destroy | test |
+           ansible | rancher | argocd | prometheus | grafana | kyverno |
            install | uninstall | help
 EOF
     exit 0
@@ -182,22 +182,25 @@ install_menu() {
   echo "  2) Rancher (K3s, Helm, cert-manager, Rancher Server)"
   echo "  3) ArgoCD"
   echo "  4) Prometheus + Grafana"
-  echo "  5) Kyverno (Policy Engine — Non-Production/Audit)"
-  echo "  6) All of the above"
-  echo "  7) Skip"
+  echo "  5) Grafana + Loki + Alloy (via ArgoCD — requires ArgoCD)"
+  echo "  6) Kyverno (Policy Engine — Non-Production/Audit)"
+  echo "  7) All of the above"
+  echo "  8) Skip"
   read -p "Enter choice: " c
   case "$c" in
     1) run_playbook "Install Ansible"    "$P_INSTALL/ansible.yml" ;;
     2) run_rancher ;;
     3) run_playbook "Install ArgoCD"     "$P_INSTALL/argocd.yml" ;;
     4) run_playbook "Install Prometheus" "$P_INSTALL/prometheus_grafana.yml" ;;
-    5) run_playbook "Install Kyverno"    "$P_INSTALL/kyverno.yml" ;;
-    6) run_playbook "Install Ansible"    "$P_INSTALL/ansible.yml"
+    5) run_playbook "Install Grafana"    "$P_INSTALL/grafana.yml" ;;
+    6) run_playbook "Install Kyverno"    "$P_INSTALL/kyverno.yml" ;;
+    7) run_playbook "Install Ansible"    "$P_INSTALL/ansible.yml"
        run_rancher
        run_playbook "Install ArgoCD"     "$P_INSTALL/argocd.yml"
        run_playbook "Install Prometheus" "$P_INSTALL/prometheus_grafana.yml"
+       run_playbook "Install Grafana"    "$P_INSTALL/grafana.yml"
        run_playbook "Install Kyverno"    "$P_INSTALL/kyverno.yml" ;;
-    7) print_info "Skipping software installation" ;;
+    8) print_info "Skipping software installation" ;;
     *) print_error "Invalid choice" ;;
   esac
 }
@@ -205,25 +208,30 @@ install_menu() {
 uninstall_menu() {
   print_header "Uninstall Menu ($TARGET)"
   echo "  1) Prometheus & Grafana"
-  echo "  2) ArgoCD"
-  echo "  3) Rancher & K3s (WARNING: removes entire cluster)"
-  echo "  4) Everything (Prometheus + ArgoCD + Rancher)"
-  echo "  5) Back"
+  echo "  2) Grafana + Loki + Alloy"
+  echo "  3) ArgoCD"
+  echo "  4) Rancher & K3s (WARNING: removes entire cluster)"
+  echo "  5) Everything (Prometheus + Grafana stack + ArgoCD + Rancher)"
+  echo "  6) Back"
   read -p "Enter choice: " c
   case "$c" in
     1) run_playbook "Uninstall Prometheus" "$P_UNINSTALL/prometheus_grafana.yml" ;;
-    2) run_playbook "Uninstall ArgoCD"     "$P_UNINSTALL/argocd.yml" ;;
-    3) print_warning "This removes the entire K3s cluster."
+    2) run_playbook "Uninstall Grafana"    "$P_UNINSTALL/grafana.yml" ;;
+    3) run_playbook "Uninstall ArgoCD"     "$P_UNINSTALL/argocd.yml" ;;
+    4) print_warning "This removes the entire K3s cluster."
        read -p "Type 'yes' to confirm: " confirm
        [ "$confirm" = "yes" ] && run_playbook "Uninstall Rancher" "$P_UNINSTALL/rancher.yml" ;;
-    4) print_warning "This will uninstall EVERYTHING!"
+    5) print_warning "This will uninstall EVERYTHING!"
        read -p "Type 'yes' to confirm: " confirm
        if [ "$confirm" = "yes" ]; then
          run_playbook "Uninstall Prometheus" "$P_UNINSTALL/prometheus_grafana.yml"
+         # Must run BEFORE ArgoCD uninstall: deleting the Applications needs
+         # the ArgoCD controller alive to process their cascade finalizers.
+         run_playbook "Uninstall Grafana"    "$P_UNINSTALL/grafana.yml"
          run_playbook "Uninstall ArgoCD"     "$P_UNINSTALL/argocd.yml"
          run_playbook "Uninstall Rancher"    "$P_UNINSTALL/rancher.yml"
        fi ;;
-    5) return 0 ;;
+    6) return 0 ;;
     *) print_error "Invalid choice" ;;
   esac
 }
@@ -265,6 +273,7 @@ Usage: $0 <target> <command>
     rancher        Install K3s + Rancher (prompts: single node vs multi-node)
     argocd         Install ArgoCD
     prometheus     Install Prometheus + Grafana
+    grafana        Install Grafana + Loki + Alloy (ArgoCD apps; needs ArgoCD)
     kyverno        Install Kyverno
     install        Show install menu
     uninstall      Show uninstall menu
@@ -303,6 +312,7 @@ case "$COMMAND" in
   rancher)    run_rancher ;;
   argocd)     run_playbook "Install ArgoCD"     "$P_INSTALL/argocd.yml" ;;
   prometheus) run_playbook "Install Prometheus" "$P_INSTALL/prometheus_grafana.yml" ;;
+  grafana)    run_playbook "Install Grafana"    "$P_INSTALL/grafana.yml" ;;
   kyverno)    run_playbook "Install Kyverno"    "$P_INSTALL/kyverno.yml" ;;
   install)    install_menu ;;
   uninstall)  uninstall_menu ;;
