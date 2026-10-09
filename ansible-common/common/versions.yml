@@ -15,8 +15,8 @@ argocd_version: "stable"
 # --- Monitoring (prometheus_grafana.yml) ---
 # Single Helm chart version -- prometheus/grafana/node-exporter/alertmanager
 # versions all come bundled together from this one chart release.
-# https://github.com/prometheus-community/helm-charts/releases
-kube_prometheus_stack_version: "91.5.0"
+# https://github.com/prometheus-community/helm-charts/releases  (tag kube-prometheus-stack-x.y.z)
+kube_prometheus_stack_version: "92.2.0"   # Prometheus Operator v0.94.1
 
 # --- Grafana : grafana-community (grafana.yml) ---
 # https://github.com/grafana-community/helm-charts/releases  (tag grafana-x.y.z)
@@ -26,6 +26,9 @@ loki_chart_version: "18.13.7"
 # Alloy chart still lives in grafana/helm-charts
 # https://github.com/grafana/helm-charts/releases            (tag alloy-x.y.z)
 alloy_chart_version: "1.13.0"
+# https://github.com/grafana-community/helm-charts/releases  (tag tempo-x.y.z)
+# (old grafana/tempo chart is deprecated; 3.x = Tempo 3, monolithic)
+tempo_chart_version: "3.1.0"         # app Tempo 3.1.0
 
 # --- Kyverno (kyverno.yml) ---
 kyverno_version: "1.19.1"        # https://github.com/kyverno/kyverno/releases

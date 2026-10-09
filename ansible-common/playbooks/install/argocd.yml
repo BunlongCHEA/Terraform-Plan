@@ -237,91 +237,91 @@
       register: secret_check
       when: inventory_hostname == first_master or is_single_node
 
-    # ==========================================
-    # STEP 7: Copy and Apply Resource Patches
-    # ==========================================
-    - name: Copy patch files to remote
-      copy:
-        src: "{{ argocd_patches_src }}/{{ item }}"
-        dest: "{{ patches_dir }}/{{ item }}"
-        mode: '0644'
-      loop: 
-        - argocd-server.json
-        - argocd-repo-server.json
-        - argocd-application-controller.json
-        - argocd-redis.json
-        - argocd-dex-server.json
-      when: inventory_hostname == first_master or is_single_node
+    # # ==========================================
+    # # STEP 7: Copy and Apply Resource Patches
+    # # ==========================================
+    # - name: Copy patch files to remote
+    #   copy:
+    #     src: "{{ argocd_patches_src }}/{{ item }}"
+    #     dest: "{{ patches_dir }}/{{ item }}"
+    #     mode: '0644'
+    #   loop: 
+    #     - argocd-server.json
+    #     - argocd-repo-server.json
+    #     - argocd-application-controller.json
+    #     - argocd-redis.json
+    #     - argocd-dex-server.json
+    #   when: inventory_hostname == first_master or is_single_node
 
-    - name: Apply argocd-server resource patch
-      command: >
-        kubectl patch deployment argocd-server
-        -n {{ argocd_namespace }}
-        --type=strategic
-        --patch-file={{ patches_dir }}/argocd-server.json
-      environment:
-        KUBECONFIG: "{{ kubeconfig_path }}"
-      register: patch_server
-      changed_when: "'patched' in patch_server.stdout or 'patched' in patch_server.stderr"
-      when: inventory_hostname == first_master or is_single_node
+    # - name: Apply argocd-server resource patch
+    #   command: >
+    #     kubectl patch deployment argocd-server
+    #     -n {{ argocd_namespace }}
+    #     --type=strategic
+    #     --patch-file={{ patches_dir }}/argocd-server.json
+    #   environment:
+    #     KUBECONFIG: "{{ kubeconfig_path }}"
+    #   register: patch_server
+    #   changed_when: "'patched' in patch_server.stdout or 'patched' in patch_server.stderr"
+    #   when: inventory_hostname == first_master or is_single_node
 
-    - name: Apply argocd-repo-server resource patch
-      command: >
-        kubectl patch deployment argocd-repo-server
-        -n {{ argocd_namespace }}
-        --type=strategic
-        --patch-file={{ patches_dir }}/argocd-repo-server.json
-      environment:
-        KUBECONFIG: "{{ kubeconfig_path }}"
-      register: patch_repo
-      changed_when: "'patched' in patch_repo.stdout or 'patched' in patch_repo.stderr"
-      when: inventory_hostname == first_master or is_single_node
+    # - name: Apply argocd-repo-server resource patch
+    #   command: >
+    #     kubectl patch deployment argocd-repo-server
+    #     -n {{ argocd_namespace }}
+    #     --type=strategic
+    #     --patch-file={{ patches_dir }}/argocd-repo-server.json
+    #   environment:
+    #     KUBECONFIG: "{{ kubeconfig_path }}"
+    #   register: patch_repo
+    #   changed_when: "'patched' in patch_repo.stdout or 'patched' in patch_repo.stderr"
+    #   when: inventory_hostname == first_master or is_single_node
 
-    - name: Apply argocd-application-controller resource patch
-      command: >
-        kubectl patch statefulset argocd-application-controller
-        -n {{ argocd_namespace }}
-        --type=strategic
-        --patch-file={{ patches_dir }}/argocd-application-controller.json
-      environment:
-        KUBECONFIG: "{{ kubeconfig_path }}"
-      register: patch_controller
-      changed_when: "'patched' in patch_controller.stdout or 'patched' in patch_controller.stderr"
-      when: inventory_hostname == first_master or is_single_node
+    # - name: Apply argocd-application-controller resource patch
+    #   command: >
+    #     kubectl patch statefulset argocd-application-controller
+    #     -n {{ argocd_namespace }}
+    #     --type=strategic
+    #     --patch-file={{ patches_dir }}/argocd-application-controller.json
+    #   environment:
+    #     KUBECONFIG: "{{ kubeconfig_path }}"
+    #   register: patch_controller
+    #   changed_when: "'patched' in patch_controller.stdout or 'patched' in patch_controller.stderr"
+    #   when: inventory_hostname == first_master or is_single_node
 
-    - name: Apply argocd-redis resource patch
-      command: >
-        kubectl patch deployment argocd-redis
-        -n {{ argocd_namespace }}
-        --type=strategic
-        --patch-file={{ patches_dir }}/argocd-redis.json
-      environment:
-        KUBECONFIG: "{{ kubeconfig_path }}"
-      register: patch_redis
-      changed_when: "'patched' in patch_redis.stdout or 'patched' in patch_redis.stderr"
-      when: inventory_hostname == first_master or is_single_node
+    # - name: Apply argocd-redis resource patch
+    #   command: >
+    #     kubectl patch deployment argocd-redis
+    #     -n {{ argocd_namespace }}
+    #     --type=strategic
+    #     --patch-file={{ patches_dir }}/argocd-redis.json
+    #   environment:
+    #     KUBECONFIG: "{{ kubeconfig_path }}"
+    #   register: patch_redis
+    #   changed_when: "'patched' in patch_redis.stdout or 'patched' in patch_redis.stderr"
+    #   when: inventory_hostname == first_master or is_single_node
 
-    - name: Apply argocd-dex-server resource patch
-      command: >
-        kubectl patch deployment argocd-dex-server
-        -n {{ argocd_namespace }}
-        --type=strategic
-        --patch-file={{ patches_dir }}/argocd-dex-server.json
-      environment:
-        KUBECONFIG: "{{ kubeconfig_path }}"
-      register: patch_dex
-      changed_when: "'patched' in patch_dex.stdout or 'patched' in patch_dex.stderr"
-      when: inventory_hostname == first_master or is_single_node
+    # - name: Apply argocd-dex-server resource patch
+    #   command: >
+    #     kubectl patch deployment argocd-dex-server
+    #     -n {{ argocd_namespace }}
+    #     --type=strategic
+    #     --patch-file={{ patches_dir }}/argocd-dex-server.json
+    #   environment:
+    #     KUBECONFIG: "{{ kubeconfig_path }}"
+    #   register: patch_dex
+    #   changed_when: "'patched' in patch_dex.stdout or 'patched' in patch_dex.stderr"
+    #   when: inventory_hostname == first_master or is_single_node
 
-    - name: Display patch results
-      debug:
-        msg:
-          - "Server patch: {{ 'Applied' if patch_server.changed else 'No change' }}"
-          - "Repo patch: {{ 'Applied' if patch_repo.changed else 'No change' }}"
-          - "Controller patch: {{ 'Applied' if patch_controller.changed else 'No change' }}"
-          - "Redis patch: {{ 'Applied' if patch_redis.changed else 'No change' }}"
-          - "Dex patch: {{ 'Applied' if patch_dex.changed else 'No change' }}"
-      when: inventory_hostname == first_master or is_single_node
+    # - name: Display patch results
+    #   debug:
+    #     msg:
+    #       - "Server patch: {{ 'Applied' if patch_server.changed else 'No change' }}"
+    #       - "Repo patch: {{ 'Applied' if patch_repo.changed else 'No change' }}"
+    #       - "Controller patch: {{ 'Applied' if patch_controller.changed else 'No change' }}"
+    #       - "Redis patch: {{ 'Applied' if patch_redis.changed else 'No change' }}"
+    #       - "Dex patch: {{ 'Applied' if patch_dex.changed else 'No change' }}"
+    #   when: inventory_hostname == first_master or is_single_node
 
     # ==========================================
     # STEP 8: Wait for Pods to Stabilize After Patching

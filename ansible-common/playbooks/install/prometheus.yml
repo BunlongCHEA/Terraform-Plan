@@ -1,0 +1,483 @@
+---
+# ======================================================================
+# Prometheus (kube-prometheus-stack) on K3s/Rancher, managed by ArgoCD
+# ======================================================================
+# This chart ships:
+#   1. Prometheus Operator  - turns ServiceMonitor/PodMonitor/PrometheusRule
+#                             CRDs into Prometheus scrape + alert config
+#   2. Prometheus           - metrics TSDB (StatefulSet, 1 replica, PVC)
+#   3. node-exporter        - DaemonSet: host CPU/mem/disk/net (master + worker)
+#   4. kube-state-metrics   - k8s object state (pods, deployments, PVCs ...)
+#   5. Alertmanager         - alert routing (StatefulSet, 1 replica, PVC)
+#   6. ~30 Grafana dashboards as ConfigMaps -> picked up by grafana.yml's
+#      dashboard sidecar into the "Kubernetes" folder
+#
+# METRICS FLOW
+#   PULL  Prometheus --scrape every 30s--> kubelet/cAdvisor, apiserver, CoreDNS,
+#         node-exporter, kube-state-metrics, any ServiceMonitor/PodMonitor
+#   PUSH  Alloy (self-metrics + app OTLP metrics)  --remote_write--> /api/v1/write
+#         Tempo metrics-generator (service graph/span metrics) --remote_write-->
+#         apps --OTLP/HTTP--> /api/v1/otlp/v1/metrics   (optional direct path)
+#   READ  Grafana datasource uid "prometheus" (provisioned by grafana.yml)
+#
+# REQUIREMENTS
+#   - K3s running, ArgoCD installed (argocd.yml)
+#   - Old Helm release from prometheus_grafana.yml removed first
+#     (this playbook stops and tells you if it is still there)
+#   - Runs ONLY on the first master: os_servers[0]
+# ======================================================================
+- name: Install Prometheus (kube-prometheus-stack) via ArgoCD
+  hosts: os_servers[0]
+  become: true
+  gather_facts: false
+  vars_files:
+    - "{{ playbook_dir }}/../../common/versions.yml"
+  vars:
+    kubeconfig_path: /etc/rancher/k3s/k3s.yaml
+    argocd_namespace: argocd
+    work_dir: /tmp/prometheus-stack
+    monitoring_namespace: monitoring
+    release_name: kube-prometheus-stack   # -> svc kube-prometheus-stack-prometheus
+ 
+    # --- Access ----------------------------------------------------------
+    prometheus_domain: "prometheus.bunlong.uk"
+    timezone: "Asia/Phnom_Penh"
+    cluster_name: "k3s-cluster"           # same value as grafana.yml
+ 
+    # --- Storage / placement ----------------------------------------------
+    storage_class: local-path
+    prometheus_pvc_size: 20Gi
+    prometheus_retention: 15d             # delete blocks older than this ...
+    prometheus_retention_size: 18GB       # ... or when TSDB exceeds this (keep < PVC)
+    alertmanager_pvc_size: 2Gi
+    scrape_interval: 30s
+    # Same idea as grafana.yml: "" = scheduler decides, "k8-1" = pin to worker
+    stateful_node: ""
+ 
+    # --- Prometheus Operator admission webhook -------------------------------
+    # false (default) = webhooks OFF: no validation of PrometheusRule/
+    #                   Alertmanager config on apply (errors show in operator logs)
+    # true            = webhooks ON with TLS cert issued by cert-manager
+    #                   (cert-manager must already be installed in the cluster)
+    use_cert_manager: false
+    operator_webhooks_off:
+      enabled: false
+      patch:
+        enabled: false
+    operator_webhooks_certmanager:
+      enabled: true
+      certManager:
+        enabled: true
+      patch:
+        enabled: false
+ 
+    stateful_node_selector: "{{ {'kubernetes.io/hostname': stateful_node} if (stateful_node | length) > 0 else {} }}"
+ 
+    # =====================================================================
+    # kube-prometheus-stack values  (chart: prometheus-community)
+    # =====================================================================
+    kps_values:
+      crds:
+        enabled: true
+ 
+      # ---- Grafana: OFF here, grafana.yml owns it ----------------------
+      grafana:
+        enabled: false
+        forceDeployDashboards: true      # still create dashboard ConfigMaps
+        forceDeployDatasources: false    # grafana.yml provisions datasources
+        defaultDashboardsEnabled: true
+        defaultDashboardsTimezone: "{{ timezone }}"
+        sidecar:
+          dashboards:
+            label: grafana_dashboard     # must match grafana.yml sidecar
+            labelValue: "1"
+ 
+      # ---- K3s specifics -------------------------------------------------
+      # K3s runs controller-manager, scheduler, kube-proxy and the datastore
+      # INSIDE the single k3s binary, bound to 127.0.0.1. Scraping them from
+      # a pod fails -> permanent "DOWN" targets + KubeSchedulerDown alerts.
+      kubeControllerManager: {enabled: false}
+      kubeScheduler: {enabled: false}
+      kubeProxy: {enabled: false}
+      kubeEtcd: {enabled: false}
+      # kept: kubeApiServer, kubelet (+cAdvisor), coreDns
+ 
+      # =================================================================
+      # PROMETHEUS
+      # =================================================================
+      prometheus:
+        ingress:
+          enabled: true
+          ingressClassName: traefik
+          annotations:
+            traefik.ingress.kubernetes.io/router.entrypoints: web
+          hosts:
+            - "{{ prometheus_domain }}"
+          paths:
+            - /
+          pathType: Prefix
+ 
+        prometheusSpec:
+          scrapeInterval: "{{ scrape_interval }}"
+          evaluationInterval: "{{ scrape_interval }}"
+ 
+          # ---- WHERE PROMETHEUS STORES METRICS ------------------------
+          # TSDB at /prometheus on PVC
+          # "prometheus-kube-prometheus-stack-prometheus-db-prometheus-..."
+          retention: "{{ prometheus_retention }}"
+          retentionSize: "{{ prometheus_retention_size }}"
+          storageSpec:
+            volumeClaimTemplate:
+              spec:
+                storageClassName: "{{ storage_class }}"
+                accessModes: ["ReadWriteOnce"]
+                resources:
+                  requests:
+                    storage: "{{ prometheus_pvc_size }}"
+ 
+          # ---- PUSH receivers (used by Alloy + Tempo from grafana.yml) --
+          enableRemoteWriteReceiver: true     # POST /api/v1/write
+          enableOTLPReceiver: true            # POST /api/v1/otlp/v1/metrics
+          otlp:
+            promoteResourceAttributes:        # OTLP resource attrs -> labels
+              - service.name
+              - service.namespace
+              - k8s.namespace.name
+              - k8s.pod.name
+          enableFeatures:
+            - exemplar-storage                # trace_id dots on graphs -> Tempo
+ 
+          # ---- WHAT TO SCRAPE: every ServiceMonitor/PodMonitor/Probe/
+          #      PrometheusRule in ANY namespace (not only release=...) --
+          serviceMonitorSelectorNilUsesHelmValues: false
+          podMonitorSelectorNilUsesHelmValues: false
+          probeSelectorNilUsesHelmValues: false
+          ruleSelectorNilUsesHelmValues: false
+          scrapeConfigSelectorNilUsesHelmValues: false
+          serviceMonitorSelector: {}
+          serviceMonitorNamespaceSelector: {}
+          podMonitorSelector: {}
+          podMonitorNamespaceSelector: {}
+          ruleSelector: {}
+          ruleNamespaceSelector: {}
+ 
+          # Added to every series on remote_write / federation / alerts
+          externalLabels:
+            cluster: "{{ cluster_name }}"
+            environment: production
+ 
+          nodeSelector: "{{ stateful_node_selector }}"
+          resources:
+            requests: {cpu: 200m, memory: 512Mi}
+            limits:   {cpu: "1", memory: 2Gi}
+ 
+      # =================================================================
+      # ALERTMANAGER
+      # =================================================================
+      alertmanager:
+        alertmanagerSpec:
+          storage:
+            volumeClaimTemplate:
+              spec:
+                storageClassName: "{{ storage_class }}"
+                accessModes: ["ReadWriteOnce"]
+                resources:
+                  requests:
+                    storage: "{{ alertmanager_pvc_size }}"
+          nodeSelector: "{{ stateful_node_selector }}"
+          resources:
+            requests: {cpu: 50m, memory: 64Mi}
+            limits:   {cpu: 100m, memory: 128Mi}
+ 
+      # =================================================================
+      # EXPORTERS
+      # =================================================================
+      nodeExporter:
+        enabled: true                    # DaemonSet -> 1 pod per node
+      prometheus-node-exporter:
+        resources:
+          requests: {cpu: 50m, memory: 64Mi}
+          limits:   {cpu: 200m, memory: 128Mi}
+      kubeStateMetrics:
+        enabled: true
+      kube-state-metrics:
+        resources:
+          requests: {cpu: 50m, memory: 64Mi}
+          limits:   {cpu: 200m, memory: 256Mi}
+ 
+      prometheusOperator:
+        resources:
+          requests: {cpu: 50m, memory: 128Mi}
+          limits:   {cpu: 200m, memory: 256Mi}
+        # The chart's default admission webhook uses Helm hook resources
+        # (admission ServiceAccount/ClusterRole/Role/Bindings + create/patch Jobs)
+        # that run and self-delete on EVERY ArgoCD sync -> app stuck in
+        # "Syncing - Retrying operation". Both modes below remove those hooks.
+        admissionWebhooks: "{{ operator_webhooks_certmanager if (use_cert_manager | bool) else operator_webhooks_off }}"
+        tls:
+          enabled: "{{ use_cert_manager | bool }}"   # TLS secret only exists with cert-manager
+ 
+  tasks:
+    # ==========================================
+    # Display Info
+    # ==========================================
+    - name: Display installation information
+      debug:
+        msg:
+          - "=========================================="
+          - "Installing Prometheus (via ArgoCD)"
+          - "=========================================="
+          - "Chart:       kube-prometheus-stack {{ kube_prometheus_stack_version }}"
+          - "Namespace:   {{ monitoring_namespace }}"
+          - "URL:         https://{{ prometheus_domain }}"
+          - "Retention:   {{ prometheus_retention }} / {{ prometheus_retention_size }}"
+          - "Pinned node: {{ stateful_node if stateful_node else '(scheduler decides)' }}"
+          - "=========================================="
+ 
+    # ==========================================
+    # Prerequisites
+    # ==========================================
+    - name: Check if K3s is running
+      command: kubectl cluster-info
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: false
+ 
+    - name: Check ArgoCD Application CRD exists
+      command: kubectl get crd applications.argoproj.io
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: argocd_crd
+      changed_when: false
+      failed_when: false
+ 
+    - name: Fail if ArgoCD is not installed
+      fail:
+        msg: "ArgoCD not found. Run the ArgoCD install (option 3) first."
+      when: argocd_crd.rc != 0
+ 
+    - name: Check cert-manager is installed (only when use_cert_manager=true)
+      command: kubectl get crd certificates.cert-manager.io issuers.cert-manager.io
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: certmanager_crd
+      changed_when: false
+      failed_when: false
+      when: use_cert_manager | bool
+ 
+    - name: Fail if cert-manager is not installed
+      fail:
+        msg: "use_cert_manager=true but cert-manager CRDs not found. Install cert-manager or set use_cert_manager: false."
+      when: (use_cert_manager | bool) and certmanager_crd.rc != 0
+ 
+    # The old prometheus_grafana.yml used `helm install` with the same release
+    # name. ArgoCD and Helm must not both own these resources.
+    - name: Check for legacy Helm release (from prometheus_grafana.yml)
+      command: >
+        kubectl get secret -n {{ monitoring_namespace }}
+        -l owner=helm,name={{ release_name }} -o name
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: legacy_release
+      changed_when: false
+      failed_when: false
+ 
+    - name: Fail if legacy Helm release still exists
+      fail:
+        msg:
+          - "Found a Helm-managed '{{ release_name }}' in namespace {{ monitoring_namespace }}."
+          - "It was installed by the old prometheus_grafana.yml (and includes its own Grafana)."
+          - "Remove it first:  ./terraform_main.sh <target> uninstall  ->  Prometheus"
+          - "(uninstall/prometheus.yml removes both the Helm and the ArgoCD version)"
+      when: legacy_release.stdout | length > 0
+ 
+    # ==========================================
+    # Render + Apply ArgoCD Application
+    # ==========================================
+    - name: Create work directory
+      file:
+        path: "{{ work_dir }}"
+        state: directory
+        mode: "0755"
+      tags: [render]
+ 
+    - name: Render ArgoCD Application manifest
+      copy:
+        dest: "{{ work_dir }}/{{ release_name }}-application.yaml"
+        mode: "0644"
+        content: "{{ app_manifest | to_nice_yaml(indent=2, width=4096) }}"
+      vars:
+        app_manifest:
+          apiVersion: argoproj.io/v1alpha1
+          kind: Application
+          metadata:
+            name: "{{ release_name }}"
+            namespace: "{{ argocd_namespace }}"
+            labels:
+              stack: prometheus
+            finalizers:
+              - resources-finalizer.argocd.argoproj.io
+          spec:
+            project: default
+            source:
+              repoURL: https://prometheus-community.github.io/helm-charts
+              chart: kube-prometheus-stack
+              targetRevision: "{{ kube_prometheus_stack_version }}"
+              helm:
+                releaseName: "{{ release_name }}"
+                valuesObject: "{{ kps_values }}"
+            destination:
+              server: https://kubernetes.default.svc
+              namespace: "{{ monitoring_namespace }}"
+            # The operator's admission-webhook job patches caBundle after
+            # sync; without this the app shows OutOfSync forever.
+            ignoreDifferences:
+              - group: admissionregistration.k8s.io
+                kind: MutatingWebhookConfiguration
+                jqPathExpressions:
+                  - ".webhooks[]?.clientConfig.caBundle"
+              - group: admissionregistration.k8s.io
+                kind: ValidatingWebhookConfiguration
+                jqPathExpressions:
+                  - ".webhooks[]?.clientConfig.caBundle"
+            syncPolicy:
+              automated:
+                prune: true
+                selfHeal: true
+              syncOptions:
+                - CreateNamespace=true
+                - ServerSideApply=true          # CRDs are too big for client-side apply
+                - RespectIgnoreDifferences=true
+              # Bounded retries instead of retrying forever
+              retry:
+                limit: 5
+                backoff:
+                  duration: 10s
+                  factor: 2
+                  maxDuration: 3m
+      tags: [render]
+ 
+    - name: Apply ArgoCD Application
+      command: kubectl apply -f {{ work_dir }}/{{ release_name }}-application.yaml
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: app_apply
+      changed_when: "'created' in app_apply.stdout or 'configured' in app_apply.stdout"
+ 
+    # ==========================================
+    # Wait & Verify
+    # ==========================================
+    - name: Wait for Application to be Synced + Healthy
+      command: >
+        kubectl get application {{ release_name }} -n {{ argocd_namespace }}
+        -o jsonpath='{.status.sync.status}/{.status.health.status}'
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: app_status
+      until: app_status.stdout == "Synced/Healthy"
+      retries: 40
+      delay: 15
+      changed_when: false
+ 
+    - name: Get pods with node placement
+      command: kubectl get pods -n {{ monitoring_namespace }} -o wide
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: mon_pods
+      changed_when: false
+ 
+    - name: Display pods
+      debug:
+        var: mon_pods.stdout_lines
+ 
+    - name: Get PVCs
+      command: kubectl get pvc -n {{ monitoring_namespace }}
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: mon_pvcs
+      changed_when: false
+ 
+    - name: Display PVCs
+      debug:
+        var: mon_pvcs.stdout_lines
+ 
+    - name: Count dashboard ConfigMaps for Grafana sidecar
+      shell: >
+        kubectl get cm -n {{ monitoring_namespace }} -l grafana_dashboard=1 --no-headers | wc -l
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: dash_count
+      changed_when: false
+ 
+    # ==========================================
+    # Cleanup
+    # ==========================================
+    - name: Remove work directory
+      file:
+        path: "{{ work_dir }}"
+        state: absent
+ 
+    # ==========================================
+    # Summary
+    # ==========================================
+    - name: Set access info
+      set_fact:
+        prometheus_access_info: |
+          ==========================================
+            Prometheus Installed (ArgoCD)
+          ==========================================
+ 
+          PROMETHEUS
+            URL:        https://{{ prometheus_domain }}
+            Internal:   http://{{ release_name }}-prometheus.{{ monitoring_namespace }}.svc:9090
+            Push in:    /api/v1/write  (remote_write)   /api/v1/otlp/v1/metrics  (OTLP)
+            Retention:  {{ prometheus_retention }} or {{ prometheus_retention_size }}
+ 
+          ALERTMANAGER
+            Internal:   http://{{ release_name }}-alertmanager.{{ monitoring_namespace }}.svc:9093
+ 
+          GRAFANA
+            Not installed here - run grafana.yml. Its "Prometheus" datasource
+            already points at the Internal URL above.
+            Dashboard ConfigMaps for the sidecar: {{ dash_count.stdout | trim }}
+ 
+          ARGOCD
+            kubectl get application {{ release_name }} -n {{ argocd_namespace }}
+ 
+          ==========================================
+            Verify Commands:
+          ==========================================
+          sudo k3s kubectl get pods -n {{ monitoring_namespace }} -o wide
+          sudo k3s kubectl get servicemonitors -A
+          sudo k3s kubectl port-forward svc/{{ release_name }}-prometheus 9090:9090 -n {{ monitoring_namespace }}
+          # http://localhost:9090/targets   -> every target should be UP
+          curl -s 'http://localhost:9090/api/v1/query?query=up' | head -c 300
+ 
+          DNS / Cloudflare Tunnel: {{ prometheus_domain }} -> Traefik (port 80)
+          ==========================================
+ 
+    - name: Display installation summary
+      debug:
+        msg: "{{ prometheus_access_info.split('\n') }}"
+ 
+    - name: Save access info to remote server
+      copy:
+        dest: /root/prometheus-access-info.txt
+        content: "{{ prometheus_access_info }}"
+        mode: "0600"
+ 
+    - name: Ensure local access-info directory exists
+      delegate_to: localhost
+      become: false
+      file:
+        path: "{{ (playbook_dir ~ '/../../access-info') | realpath }}"
+        state: directory
+        mode: "0755"
+ 
+    - name: Save access info to local machine (ansible-common/access-info/)
+      delegate_to: localhost
+      become: false
+      copy:
+        dest: "{{ (playbook_dir ~ '/../../access-info') | realpath }}/{{ inventory_hostname }}-prometheus-access-info.txt"
+        content: "{{ prometheus_access_info }}"
+        mode: "0644"

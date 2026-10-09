@@ -1,0 +1,121 @@
+---
+# Removes kube-prometheus-stack - BOTH the new ArgoCD version (prometheus.yml)
+# Grafana/Loki/Tempo/Alloy live in namespace "grafana" and are NOT touched.
+- name: Uninstall Prometheus (kube-prometheus-stack)
+  hosts: os_servers[0]
+  become: true
+  gather_facts: false
+  vars:
+    kubeconfig_path: /etc/rancher/k3s/k3s.yaml
+    argocd_namespace: argocd
+    monitoring_namespace: monitoring
+    release_name: kube-prometheus-stack
+
+  tasks:
+    # ---- ArgoCD version ----------------------------------------------------
+    - name: Delete ArgoCD Application (cascade delete of k8s resources)
+      command: >
+        kubectl delete applications -n {{ argocd_namespace }}
+        -l stack=prometheus --wait=true --timeout=300s
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: app_delete
+      changed_when: "'deleted' in app_delete.stdout"
+      failed_when: false
+
+    # ---- Legacy Helm version -----------------------------------------------
+    - name: Check for legacy Helm release
+      command: >
+        kubectl get secret -n {{ monitoring_namespace }}
+        -l owner=helm,name={{ release_name }} -o name
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: legacy_release
+      changed_when: false
+      failed_when: false
+
+    - name: Helm uninstall legacy release
+      command: helm uninstall {{ release_name }} -n {{ monitoring_namespace }} --wait --timeout 5m
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      when: legacy_release.stdout | length > 0
+      register: helm_uninstall
+      failed_when: false
+
+    - name: Delete legacy manual Ingresses
+      command: >
+        kubectl delete ingress prometheus-ingress grafana-ingress
+        -n {{ monitoring_namespace }} --ignore-not-found
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: false
+      failed_when: false
+
+    # ---- Data + namespace ----------------------------------------------------
+    - name: Delete PVCs (Prometheus + Alertmanager TSDB data)
+      command: kubectl delete pvc --all -n {{ monitoring_namespace }} --timeout=120s
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: pvc_delete
+      changed_when: "'deleted' in pvc_delete.stdout"
+      failed_when: false
+
+    - name: Delete monitoring namespace
+      command: kubectl delete namespace {{ monitoring_namespace }} --timeout=180s
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: ns_delete
+      changed_when: "'deleted' in ns_delete.stdout"
+      failed_when: false
+
+    # WARNING: removes every ServiceMonitor/PodMonitor/PrometheusRule in ALL
+    # namespaces (CRDs are cluster-wide). Helm/ArgoCD never delete CRDs.
+    - name: Delete Prometheus Operator CRDs
+      shell: |
+        kubectl get crd -o name | grep 'monitoring.coreos.com' | xargs -r kubectl delete --timeout=120s
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: crd_delete
+      changed_when: "'deleted' in crd_delete.stdout"
+      failed_when: false
+
+    # ---- Local files -------------------------------------------------------
+    - name: Remove access info files from local machine
+      delegate_to: localhost
+      become: false
+      file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - "{{ (playbook_dir ~ '/../../access-info') | realpath }}/{{ inventory_hostname }}-prometheus-access-info.txt"
+        - "{{ (playbook_dir ~ '/../../access-info') | realpath }}/{{ inventory_hostname }}-prometheus-grafana-access-info.txt"   # legacy
+        - ./rancher/prometheus-grafana-access-info.txt                                        # legacy
+ 
+    - name: Remove access info files from remote server
+      file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /root/prometheus-access-info.txt
+        - /root/prometheus-grafana-access-info.txt   # legacy
+
+    - name: Verify nothing is left
+      shell: |
+        kubectl get applications -n {{ argocd_namespace }} -l stack=prometheus 2>&1
+        kubectl get namespace {{ monitoring_namespace }} 2>&1 || true
+        kubectl get crd 2>/dev/null | grep monitoring.coreos.com || echo "No monitoring.coreos.com CRDs"
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: verify
+      changed_when: false
+
+    - name: Display uninstall summary
+      debug:
+        msg:
+          - "=========================================="
+          - "  Prometheus Uninstalled"
+          - "=========================================="
+          - "{{ verify.stdout_lines }}"
+          - "Grafana stack (namespace grafana) untouched - its Prometheus datasource"
+          - "and Alloy/Tempo remote_write will error until prometheus.yml is reinstalled."
+          - "Manual: remove prometheus.bunlong.uk from DNS / Cloudflare Tunnel if unused"
