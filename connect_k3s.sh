@@ -3,9 +3,10 @@
 # connect_k3s.sh
 # ===========================================
 # Run this once whenever you start your local PC, before testing/using
-# any k3s cluster. It reads server definitions from deploy.env (the
-# SAME file argo_dockerapp/deploy.sh uses), so adding a new server is
-# just adding 4 lines to deploy.env -- no script changes needed here.
+# any k3s cluster. It reads server definitions from
+# ansible-common/common/deploy.env (the SAME file terraform_main.sh and
+# argo_dockerapp/deploy.sh use), so adding a new server is just adding
+# 4 lines to deploy.env -- no script changes needed here.
 #
 # For each server in K3S_SERVER_NAMES, this:
 #   1. Opens its SSH tunnel (skips if the local port is already bound).
@@ -15,7 +16,8 @@
 #
 # Usage:
 #   ./connect_k3s.sh [path/to/deploy.env]
-#   (defaults to ./deploy.env if no path given)
+#   ./terraform_main.sh <target> connect
+#   (defaults to ansible-common/common/deploy.env next to this script)
 # ===========================================
 
 set -u
@@ -36,12 +38,22 @@ print_info()    { echo -e "${BLUE}ℹ $1${NC}"; }
 # ----------------------------------------------------------------
 # Load server definitions from deploy.env
 # ----------------------------------------------------------------
-ENV_FILE="${1:-deploy.env}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ENV_FILE="${1:-$SCRIPT_DIR/ansible-common/common/deploy.env}"
+# Old locations still work, with a hint to move the file
+if [ -z "${1:-}" ] && [ ! -f "$ENV_FILE" ]; then
+    for old in "$SCRIPT_DIR/deploy.env" "$SCRIPT_DIR/argo_dockerapp/deploy.env"; do
+        if [ -f "$old" ]; then
+            print_warning "Using old $old - move it to ansible-common/common/deploy.env"
+            ENV_FILE="$old"; break
+        fi
+    done
+fi
 
 if [ ! -f "$ENV_FILE" ]; then
     print_error "deploy.env not found at: $ENV_FILE"
     print_info "Usage: $0 [path/to/deploy.env]"
-    print_info "Or copy deploy.env.example to deploy.env first."
+    print_info "Or: cp ansible-common/common/deploy.env.example ansible-common/common/deploy.env"
     exit 1
 fi
 
@@ -166,7 +178,7 @@ done
 
 echo ""
 if [ "$fail_count" -eq 0 ]; then
-    print_success "All ${#K3S_SERVER_NAMES[@]} cluster(s) reachable. Ready for argo_dockerapp/deploy.sh"
+    print_success "All ${#K3S_SERVER_NAMES[@]} cluster(s) reachable. Ready for terraform_main.sh / argo_dockerapp/deploy.sh"
 else
     print_error "$fail_count of ${#K3S_SERVER_NAMES[@]} cluster(s) failed -- see errors above"
     exit 1

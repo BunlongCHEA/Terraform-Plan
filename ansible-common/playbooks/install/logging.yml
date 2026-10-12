@@ -1,0 +1,938 @@
+---
+# ======================================================================
+# Logging: Elasticsearch + Kibana + log shipper on K3s, managed by ArgoCD
+# ======================================================================
+# Same flow as grafana.yml / prometheus.yml: Ansible renders ArgoCD
+# Application CRs pointing at upstream Helm charts (values inline), applies
+# them, waits for Synced/Healthy, configures Elasticsearch, saves access info.
+# Nothing has to be pushed to Git.
+#
+# APPLICATIONS (label stack=logging)
+#   eck-operator   elastic/eck-operator        ns elastic-system
+#                  Elastic's operator: turns Elasticsearch/Kibana CRs into
+#                  StatefulSets, Services, certs and users. Needed because the
+#                  old standalone elastic/elasticsearch chart stops at 8.5.1.
+#   elasticsearch  elastic/eck-elasticsearch   ns logging   (CR "elasticsearch")
+#   kibana         elastic/eck-kibana          ns logging   (CR "kibana")
+#   otel-collector open-telemetry chart        ns logging   log_shipper=alloy
+#   fluent-bit     fluent/fluent-bit chart     ns logging   log_shipper=fluent-bit
+#
+# LOG SHIPPER (log_shipper: set it in <target>/group_vars/all.yml)
+#   alloy       Reuse Alloy from grafana.yml (it already tails every pod):
+#                 Alloy --OTLP--> otel-collector --> Elasticsearch
+#               Alloy v1.20 has NO Elasticsearch log exporter, so the OTel
+#               Collector (contrib build, elasticsearch exporter) bridges it.
+#               -> data stream logs-alloy.otel-default
+#               Re-run grafana.yml AFTER this playbook to switch Alloy on.
+#   fluent-bit  Fluent Bit DaemonSet ships directly to Elasticsearch
+#               -> index <fluent_bit_index_prefix>-YYYY.MM.DD
+#   none        Elasticsearch + Kibana only
+#
+# SECURITY (ECK always enables it)
+#   elastic     superuser, Kibana login. Secret elasticsearch-es-elastic-user
+#   log-writer  write-only user for the shippers. Secret es-log-writer,
+#               created once by this playbook (password kept on re-runs)
+#   HTTP inside the cluster is plain (TLS off on 9200/5601); TLS to the
+#   browser is terminated by Cloudflare, same as Grafana/ArgoCD.
+#
+# REQUIREMENTS: K3s, ArgoCD (argocd.yml). Runs ONLY on os_servers[0].
+# ======================================================================
+- name: Install Logging (Elasticsearch + Kibana + log shipper) via ArgoCD
+  hosts: os_servers[0]
+  become: true
+  gather_facts: false
+  vars_files:
+    - "{{ playbook_dir }}/../../common/versions.yml"
+  vars:
+    kubeconfig_path: /etc/rancher/k3s/k3s.yaml
+    argocd_namespace: argocd
+    operator_namespace: elastic-system
+    logging_namespace: logging
+    work_dir: /tmp/logging-stack
+    elastic_helm_repo: https://helm.elastic.co
+
+    # --- Access ---------------------------------------------------------------
+    kibana_domain: "kibana.bunlong.uk"   # override per target in group_vars/all.yml
+    cluster_name: "k3s-cluster"          # same value as grafana.yml / prometheus.yml
+
+    # --- Elasticsearch sizing / placement --------------------------------------
+    storage_class: local-path
+    es_pvc_size: 10Gi                    # first install only (claim size is immutable)
+    # Heap is sized automatically to 50% of the memory limit (2Gi -> 1g heap)
+    es_resources:
+      requests: {cpu: 250m, memory: 2Gi}
+      limits:   {cpu: "1", memory: 2Gi}
+    kibana_resources:
+      requests: {cpu: 100m, memory: 768Mi}
+      limits:   {cpu: "1", memory: 1Gi}
+    log_retention_days: 7                # ILM: delete log indices older than this
+    # K3s node name to pin Elasticsearch to ("" = scheduler decides; the
+    # local-path PV then keeps it on that node). Same idea as grafana.yml.
+    stateful_node: ""
+
+    # --- Log shipper -----------------------------------------------------------
+    log_shipper: alloy                   # alloy | fluent-bit | none
+    fluent_bit_index_prefix: kyc-logs
+    # Namespaces dropped before Elasticsearch (regex alternation), same default
+    # as grafana.yml's alloy_drop_namespaces
+    drop_namespaces: "kube-node-lease"
+
+    # --- Derived (do not edit) -------------------------------------------------
+    es_name: elasticsearch               # ECK resource name -> svc elasticsearch-es-http
+    kibana_name: kibana                  # ECK resource name -> svc kibana-kb-http
+    es_host: "{{ es_name }}-es-http.{{ logging_namespace }}.svc"
+    es_url: "http://{{ es_host }}:9200"
+    stateful_node_selector: "{{ {'kubernetes.io/hostname': stateful_node} if (stateful_node | length) > 0 else {} }}"
+    in_cluster: "https://kubernetes.default.svc"
+
+    # =====================================================================
+    # Least-privilege role for the shippers (Secret es-roles, key roles.yml)
+    # =====================================================================
+    es_roles_yml: |
+      log_writer:
+        cluster: ["monitor"]
+        indices:
+          - names: ["logs-*", "{{ fluent_bit_index_prefix }}-*"]
+            privileges: ["auto_configure", "create_index", "create_doc", "view_index_metadata"]
+
+    # =====================================================================
+    # ECK OPERATOR  (chart elastic/eck-operator)
+    # =====================================================================
+    eck_operator_values:
+      managedNamespaces: ["{{ logging_namespace }}"]   # only watch the logging namespace
+      resources:
+        requests: {cpu: 100m, memory: 150Mi}
+        limits:   {cpu: 500m, memory: 512Mi}
+      # Validating webhook stays on (bad specs are rejected at apply time);
+      # failurePolicy Ignore = an operator outage never blocks the API server.
+      # The operator writes the webhook's caBundle itself -> ignoreDifferences.
+      webhook:
+        enabled: true
+        failurePolicy: Ignore
+      telemetry:
+        disabled: true
+
+    # =====================================================================
+    # ELASTICSEARCH  (chart elastic/eck-elasticsearch -> Elasticsearch CR)
+    # Every key below is the Elasticsearch CR spec:
+    #   kubectl explain elasticsearch.spec --recursive
+    # =====================================================================
+    elasticsearch_values:
+      fullnameOverride: "{{ es_name }}"
+      version: "{{ elasticsearch_version }}"
+      http:
+        tls:
+          selfSignedCertificate:
+            disabled: true             # plain HTTP on 9200 inside the cluster
+      auth:
+        fileRealm:
+          - secretName: es-log-writer  # user log-writer (basic-auth Secret, roles=log_writer)
+        roles:
+          - secretName: es-roles       # defines role log_writer
+      nodeSets:
+        - name: default
+          count: 1
+          config:
+            # niofs instead of mmap: no vm.max_map_count sysctl and no
+            # privileged init container needed (fine for a 1-node lab)
+            node.store.allow_mmap: false
+            xpack.ml.enabled: false    # ML unused for logs; saves memory on a Pi
+          podTemplate:
+            spec:
+              nodeSelector: "{{ stateful_node_selector }}"
+              containers:
+                - name: elasticsearch
+                  resources: "{{ es_resources }}"
+          # ---- WHERE ELASTICSEARCH STORES DATA: PVC elasticsearch-data-elasticsearch-es-default-0
+          volumeClaimTemplates:
+            - metadata:
+                name: elasticsearch-data   # name required by ECK
+              spec:
+                accessModes: ["ReadWriteOnce"]
+                storageClassName: "{{ storage_class }}"
+                resources:
+                  requests:
+                    storage: "{{ es_pvc_size }}"
+
+    # =====================================================================
+    # KIBANA  (chart elastic/eck-kibana -> Kibana CR)
+    # =====================================================================
+    kibana_values:
+      fullnameOverride: "{{ kibana_name }}"
+      version: "{{ elasticsearch_version }}"   # must equal the Elasticsearch version
+      count: 1
+      elasticsearchRef:
+        name: "{{ es_name }}"          # ECK wires URL + service account token
+      http:
+        tls:
+          selfSignedCertificate:
+            disabled: true             # plain HTTP on 5601 (Traefik -> Kibana)
+      config:
+        server.publicBaseUrl: "https://{{ kibana_domain }}"
+        telemetry.optIn: false
+        telemetry.allowChangingOptInStatus: false
+      podTemplate:
+        spec:
+          containers:
+            - name: kibana
+              resources: "{{ kibana_resources }}"
+      ingress:
+        enabled: true
+        className: traefik
+        annotations:
+          traefik.ingress.kubernetes.io/router.entrypoints: web
+        hosts:
+          - host: "{{ kibana_domain }}"
+            path: /
+        pathType: Prefix
+
+    # =====================================================================
+    # OTEL COLLECTOR  (log_shipper=alloy)  Alloy -> here -> Elasticsearch
+    # Service otel-collector.logging.svc:4318 = grafana.yml alloy_otlp_endpoint
+    # =====================================================================
+    otel_collector_config:
+      extensions:
+        health_check:
+          endpoint: "${env:MY_POD_IP}:13133"
+      receivers:
+        otlp:
+          protocols:
+            grpc: {endpoint: "${env:MY_POD_IP}:4317"}
+            http: {endpoint: "${env:MY_POD_IP}:4318"}
+      processors:
+        memory_limiter:
+          check_interval: 5s
+          limit_percentage: 80
+          spike_limit_percentage: 25
+        # Alloy sends Loki labels as flat log attributes (namespace, pod,
+        # container, node, app, level, stream, trace_id, ...).
+        # 1) rename to OTel semantic names, set severity + trace id, drop noise
+        transform/k8s:
+          error_mode: ignore
+          log_statements:
+            - context: log
+              statements:
+                - set(attributes["k8s.namespace.name"], attributes["namespace"]) where attributes["namespace"] != nil
+                - set(attributes["k8s.pod.name"], attributes["pod"]) where attributes["pod"] != nil
+                - set(attributes["k8s.container.name"], attributes["container"]) where attributes["container"] != nil
+                - set(attributes["k8s.node.name"], attributes["node"]) where attributes["node"] != nil
+                - set(attributes["service.name"], attributes["app"]) where attributes["app"] != nil
+                - set(attributes["log.iostream"], attributes["stream"]) where attributes["stream"] != nil
+                - set(severity_text, ToUpperCase(attributes["level"])) where attributes["level"] != nil
+                - set(trace_id.string, attributes["trace_id"]) where attributes["trace_id"] != nil and IsMatch(attributes["trace_id"], "^[0-9a-f]{32}$")
+                - delete_matching_keys(attributes, "^(namespace|pod|container|node|app|stream|level|trace_id|filename|loki\\..+|log\\.file\\..+)$")
+        # 2) move the k8s identity onto the resource, one resource per pod
+        #    (ES maps resource.attributes.k8s.* to ECS kubernetes.* fields)
+        groupbyattrs/k8s:
+          keys: [k8s.namespace.name, k8s.pod.name, k8s.container.name, k8s.node.name, service.name]
+        # 3) cluster name + target data stream: logs-alloy.otel-default
+        resource/es:
+          attributes:
+            - {key: k8s.cluster.name, value: "{{ cluster_name }}", action: upsert}
+            - {key: data_stream.dataset, value: alloy, action: upsert}
+      exporters:
+        elasticsearch:
+          endpoints: ["{{ es_url }}"]
+          user: "${env:ES_USER}"
+          password: "${env:ES_PASSWORD}"
+      service:
+        extensions: [health_check]
+        pipelines:
+          logs:
+            receivers: [otlp]
+            processors: [memory_limiter, transform/k8s, groupbyattrs/k8s, resource/es]
+            exporters: [elasticsearch]
+
+    otel_collector_values:
+      mode: deployment
+      fullnameOverride: otel-collector
+      image:
+        repository: otel/opentelemetry-collector-contrib   # contrib = has the elasticsearch exporter
+      replicaCount: 1
+      ports:
+        jaeger-compact: {enabled: false}
+        jaeger-thrift: {enabled: false}
+        jaeger-grpc: {enabled: false}
+        zipkin: {enabled: false}
+      extraEnvs:
+        - name: ES_USER
+          valueFrom: {secretKeyRef: {name: es-log-writer, key: username}}
+        - name: ES_PASSWORD
+          valueFrom: {secretKeyRef: {name: es-log-writer, key: password}}
+      resources:
+        requests: {cpu: 50m, memory: 128Mi}
+        limits:   {cpu: 500m, memory: 384Mi}
+      # Full config, NOT merged with chart defaults (no jaeger/zipkin/debug)
+      alternateConfig: "{{ otel_collector_config }}"
+
+    # =====================================================================
+    # FLUENT BIT  (log_shipper=fluent-bit)  filters mirror Alloy
+    # =====================================================================
+    fluent_bit_values:
+      kind: DaemonSet
+      logLevel: info
+      tolerations:
+        - operator: Exists             # every node, including tainted control-plane
+      resources:
+        requests: {cpu: 50m, memory: 64Mi}
+        limits:   {cpu: 200m, memory: 256Mi}
+      env:
+        - name: ES_USER
+          valueFrom: {secretKeyRef: {name: es-log-writer, key: username}}
+        - name: ES_PASSWORD
+          valueFrom: {secretKeyRef: {name: es-log-writer, key: password}}
+      # K3s = containerd: no /var/lib/docker. /var/log/containers -> /var/log/pods
+      # are both under /var/log (read-write: the tail DB lives there).
+      daemonSetVolumes:
+        - name: varlog
+          hostPath: {path: /var/log}
+        - name: etcmachineid
+          hostPath: {path: /etc/machine-id, type: File}
+      daemonSetVolumeMounts:
+        - {name: varlog, mountPath: /var/log}
+        - {name: etcmachineid, mountPath: /etc/machine-id, readOnly: true}
+      config:
+        service: |
+          [SERVICE]
+              Daemon        Off
+              Flush         1
+              Log_Level     info
+              Parsers_File  /fluent-bit/etc/parsers.conf
+              Parsers_File  /fluent-bit/etc/conf/custom_parsers.conf
+              HTTP_Server   On
+              HTTP_Listen   0.0.0.0
+              HTTP_Port     2020
+              Health_Check  On
+        # 1) COLLECT every container log on this node (CRI format on K3s)
+        inputs: |
+          [INPUT]
+              Name              tail
+              Path              /var/log/containers/*.log
+              Exclude_Path      /var/log/containers/fluent-bit-*_{{ logging_namespace }}_*.log
+              multiline.parser  cri, docker
+              Tag               kube.*
+              DB                /var/log/flb_kube.db
+              Mem_Buf_Limit     10MB
+              Skip_Long_Lines   On
+              Refresh_Interval  10
+        # 2) ENRICH with pod metadata, 3) FILTER, 4) tag the cluster
+        filters: |
+          [FILTER]
+              Name                kubernetes
+              Match               kube.*
+              Merge_Log           On
+              Merge_Log_Key       log_processed
+              Keep_Log            Off
+              K8S-Logging.Parser  On
+              K8S-Logging.Exclude On
+              Labels              On
+              Annotations         Off
+
+          [FILTER]
+              Name     grep
+              Match    kube.*
+              Exclude  $kubernetes['namespace_name'] ^({{ drop_namespaces }})$
+
+          [FILTER]
+              Name     grep
+              Match    kube.*
+              Exclude  log (?i)"?(GET|HEAD) /(healthz|readyz|livez|ping|metrics)
+
+          [FILTER]
+              Name     modify
+              Match    kube.*
+              Add      cluster {{ cluster_name }}
+        # 5) SHIP to Elasticsearch as log-writer, one index per day
+        outputs: |
+          [OUTPUT]
+              Name                es
+              Match               kube.*
+              Host                {{ es_host }}
+              Port                9200
+              HTTP_User           ${ES_USER}
+              HTTP_Passwd         ${ES_PASSWORD}
+              tls                 Off
+              Logstash_Format     On
+              Logstash_Prefix     {{ fluent_bit_index_prefix }}
+              Logstash_DateFormat %Y.%m.%d
+              Time_Key            @timestamp
+              Suppress_Type_Name  On
+              Replace_Dots        On
+              Trace_Error         On
+              Retry_Limit         False
+
+    # =====================================================================
+    # Applications. wave: install order (each wave waits for the previous)
+    # =====================================================================
+    eck_operator_app:
+      name: eck-operator
+      wave: 1
+      namespace: "{{ operator_namespace }}"
+      source:
+        repoURL: "{{ elastic_helm_repo }}"
+        chart: eck-operator
+        targetRevision: "{{ eck_operator_chart_version }}"
+        helm:
+          releaseName: elastic-operator
+          valuesObject: "{{ eck_operator_values }}"
+      ignoreDifferences:
+        - group: admissionregistration.k8s.io
+          kind: ValidatingWebhookConfiguration
+          jqPathExpressions:
+            - ".webhooks[]?.clientConfig.caBundle"
+
+    elasticsearch_app:
+      name: elasticsearch
+      wave: 2
+      namespace: "{{ logging_namespace }}"
+      source:
+        repoURL: "{{ elastic_helm_repo }}"
+        chart: eck-elasticsearch
+        targetRevision: "{{ eck_stack_chart_version }}"
+        helm:
+          releaseName: elasticsearch
+          valuesObject: "{{ elasticsearch_values }}"
+
+    kibana_app:
+      name: kibana
+      wave: 2
+      namespace: "{{ logging_namespace }}"
+      source:
+        repoURL: "{{ elastic_helm_repo }}"
+        chart: eck-kibana
+        targetRevision: "{{ eck_stack_chart_version }}"
+        helm:
+          releaseName: kibana
+          valuesObject: "{{ kibana_values }}"
+
+    otel_collector_app:
+      name: otel-collector
+      wave: 3
+      namespace: "{{ logging_namespace }}"
+      source:
+        repoURL: https://open-telemetry.github.io/opentelemetry-helm-charts
+        chart: opentelemetry-collector
+        targetRevision: "{{ otel_collector_chart_version }}"
+        helm:
+          releaseName: otel-collector
+          valuesObject: "{{ otel_collector_values }}"
+
+    fluent_bit_app:
+      name: fluent-bit
+      wave: 3
+      namespace: "{{ logging_namespace }}"
+      source:
+        repoURL: https://fluent.github.io/helm-charts
+        chart: fluent-bit
+        targetRevision: "{{ fluent_bit_chart_version }}"
+        helm:
+          releaseName: fluent-bit
+          valuesObject: "{{ fluent_bit_values }}"
+
+    logging_apps: >-
+      {{ [eck_operator_app, elasticsearch_app, kibana_app]
+         + ([otel_collector_app] if log_shipper == 'alloy' else [])
+         + ([fluent_bit_app] if log_shipper == 'fluent-bit' else []) }}
+
+  tasks:
+    # ==========================================
+    # Validate + show plan (also run with --tags render)
+    # ==========================================
+    - name: Validate log_shipper
+      assert:
+        that: log_shipper in ['alloy', 'fluent-bit', 'none']
+        fail_msg: "log_shipper={{ log_shipper }} - allowed: alloy | fluent-bit | none (set it in group_vars/all.yml)"
+        quiet: true
+      tags: [render]
+
+    - name: Display installation information
+      debug:
+        msg:
+          - "=========================================="
+          - "Installing Logging (via ArgoCD)"
+          - "=========================================="
+          - "ECK operator chart:   {{ eck_operator_chart_version }}  (ns {{ operator_namespace }})"
+          - "Elasticsearch/Kibana: {{ elasticsearch_version }}  (charts {{ eck_stack_chart_version }}, ns {{ logging_namespace }})"
+          - "Kibana URL:           https://{{ kibana_domain }}"
+          - "Log shipper:          {{ log_shipper }}"
+          - "Retention:            {{ log_retention_days }} days"
+          - "=========================================="
+      tags: [render]
+
+    # ==========================================
+    # Prerequisites
+    # ==========================================
+    - name: Check if K3s is running
+      command: kubectl cluster-info
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: false
+
+    - name: Check ArgoCD Application CRD exists
+      command: kubectl get crd applications.argoproj.io
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: argocd_crd
+      changed_when: false
+      failed_when: false
+
+    - name: Fail if ArgoCD is not installed
+      fail:
+        msg: "ArgoCD not found. Run the ArgoCD install (option 3) first."
+      when: argocd_crd.rc != 0
+
+    # The old argo_dockerapp/deploy.sh stack also used namespace "logging"
+    # and the same Kibana host. Two stacks would fight over the Ingress.
+    - name: Check for the old argo_dockerapp logging stack
+      shell: |
+        kubectl get applications -n {{ argocd_namespace }} -o name 2>/dev/null | grep -E '/kyc-(logging-stack|es-kibana|fluentbit-.*)$'
+        kubectl get statefulset/elasticsearch deployment/kibana -n {{ logging_namespace }} -o name 2>/dev/null
+        true
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: legacy
+      changed_when: false
+
+    - name: Fail if the old stack is still running
+      fail:
+        msg:
+          - "Old argo_dockerapp logging stack found: {{ legacy.stdout_lines }}"
+          - "Remove it first (its PVC data is deleted too):"
+          - "  kubectl delete application -n argocd kyc-logging-stack --ignore-not-found"
+          - "  kubectl delete statefulset/elasticsearch deployment/kibana svc/elasticsearch svc/elasticsearch-external svc/kibana ingress/kibana-ingress daemonset/fluent-bit -n logging --ignore-not-found"
+          - "  kubectl delete pvc es-data-elasticsearch-0 -n logging --ignore-not-found"
+      when: legacy.stdout_lines | length > 0
+
+    # ==========================================
+    # Namespaces + credentials (kept out of ArgoCD/Git on purpose)
+    # ==========================================
+    - name: Apply namespaces
+      shell: |
+        for ns in {{ operator_namespace }} {{ logging_namespace }}; do
+          kubectl create namespace $ns --dry-run=client -o yaml | kubectl apply -f -
+        done
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: ns_result
+      changed_when: "'created' in ns_result.stdout"
+
+    - name: Check log-writer Secret
+      command: kubectl get secret es-log-writer -n {{ logging_namespace }}
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: writer_secret
+      changed_when: false
+      failed_when: false
+
+    # Created once: re-runs keep the password, so shippers never restart for nothing
+    - name: Create log-writer Secret (basic-auth, role log_writer)
+      shell: >
+        kubectl create secret generic es-log-writer -n {{ logging_namespace }}
+        --type=kubernetes.io/basic-auth
+        --from-literal=username=log-writer
+        --from-literal=password='{{ lookup("password", "/dev/null length=32 chars=ascii_letters,digits") }}'
+        --from-literal=roles=log_writer
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      when: writer_secret.rc != 0
+      no_log: true
+
+    - name: Create work directory
+      file:
+        path: "{{ work_dir }}"
+        state: directory
+        mode: "0700"
+      tags: [render]
+
+    - name: Write roles.yml
+      copy:
+        dest: "{{ work_dir }}/roles.yml"
+        content: "{{ es_roles_yml }}"
+        mode: "0600"
+      tags: [render]
+
+    - name: Apply roles Secret (es-roles)
+      shell: |
+        kubectl create secret generic es-roles -n {{ logging_namespace }} \
+          --from-file=roles.yml={{ work_dir }}/roles.yml --dry-run=client -o yaml | kubectl apply -f -
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: roles_apply
+      changed_when: "'created' in roles_apply.stdout or 'configured' in roles_apply.stdout"
+
+    # ==========================================
+    # Render ArgoCD Applications
+    # ==========================================
+    - name: Render ArgoCD Application manifests
+      copy:
+        dest: "{{ work_dir }}/{{ item.name }}-application.yaml"
+        mode: "0644"
+        content: "{{ app_manifest | to_nice_yaml(indent=2, width=4096) }}"
+      vars:
+        app_manifest:
+          apiVersion: argoproj.io/v1alpha1
+          kind: Application
+          metadata:
+            name: "{{ item.name }}"
+            namespace: "{{ argocd_namespace }}"
+            labels:
+              stack: logging
+            annotations:
+              # Diff against the API server's defaulted objects (no false OutOfSync)
+              argocd.argoproj.io/compare-options: ServerSideDiff=true
+            finalizers:
+              - resources-finalizer.argocd.argoproj.io
+          spec:
+            project: default
+            source: "{{ item.source }}"
+            destination:
+              server: "{{ in_cluster }}"
+              namespace: "{{ item.namespace }}"
+            ignoreDifferences: "{{ item.ignoreDifferences | default([]) }}"
+            syncPolicy:
+              automated:
+                prune: true
+                selfHeal: true
+              syncOptions:
+                - CreateNamespace=true
+                - ServerSideApply=true          # ECK CRDs are too big for client-side apply
+                - RespectIgnoreDifferences=true
+              retry:
+                limit: 5
+                backoff: {duration: 10s, factor: 2, maxDuration: 3m}
+      loop: "{{ logging_apps }}"
+      loop_control:
+        label: "{{ item.name }}"
+      tags: [render]
+
+    # ==========================================
+    # Wave 1: ECK operator (+ CRDs)
+    # ==========================================
+    - name: "Wave 1 - apply eck-operator"
+      command: kubectl apply -f {{ work_dir }}/eck-operator-application.yaml
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: w1
+      changed_when: "'created' in w1.stdout or 'configured' in w1.stdout"
+
+    - name: "Wave 1 - wait for eck-operator Synced/Healthy"
+      command: >
+        kubectl get application eck-operator -n {{ argocd_namespace }}
+        -o jsonpath='{.status.sync.status}/{.status.health.status}'
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: w1_status
+      until: w1_status.stdout == "Synced/Healthy"
+      retries: 40
+      delay: 15
+      changed_when: false
+
+    - name: "Wave 1 - wait for ECK CRDs"
+      command: >
+        kubectl wait --for condition=established --timeout=120s
+        crd/elasticsearches.elasticsearch.k8s.elastic.co crd/kibanas.kibana.k8s.elastic.co
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: false
+
+    # ==========================================
+    # Wave 2: Elasticsearch + Kibana
+    # ArgoCD reports Elasticsearch Healthy only when the cluster is GREEN
+    # (yellow = Progressing). First start on a Pi takes 2-5 minutes.
+    # ==========================================
+    - name: "Wave 2 - apply elasticsearch + kibana"
+      command: kubectl apply -f {{ work_dir }}/{{ item }}-application.yaml
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      loop: [elasticsearch, kibana]
+      register: w2
+      changed_when: "'created' in w2.stdout or 'configured' in w2.stdout"
+
+    - name: "Wave 2 - wait for elasticsearch Synced/Healthy (cluster green)"
+      command: >
+        kubectl get application elasticsearch -n {{ argocd_namespace }}
+        -o jsonpath='{.status.sync.status}/{.status.health.status}'
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: es_status
+      until: es_status.stdout == "Synced/Healthy"
+      retries: 60
+      delay: 15
+      changed_when: false
+
+    # ArgoCD has no health check for the Kibana CR -> ask ECK directly
+    - name: "Wave 2 - wait for Kibana health green"
+      command: kubectl get kibana {{ kibana_name }} -n {{ logging_namespace }} -o jsonpath='{.status.health}'
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: kb_status
+      until: kb_status.stdout == "green"
+      retries: 60
+      delay: 15
+      changed_when: false
+
+    # ==========================================
+    # Configure Elasticsearch (BEFORE shippers write the first index)
+    #   - ILM retention, replicas 0 (single node -> stays green)
+    #   - Kibana data views
+    # Called on the Service ClusterIPs from this node, as user "elastic".
+    # ==========================================
+    - name: Get elastic superuser password
+      command: >
+        kubectl get secret {{ es_name }}-es-elastic-user -n {{ logging_namespace }}
+        -o jsonpath='{.data.elastic}'
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: elastic_pw_b64
+      changed_when: false
+      no_log: true
+
+    - name: Get Elasticsearch / Kibana ClusterIPs
+      command: >
+        kubectl get svc {{ item }} -n {{ logging_namespace }} -o jsonpath='{.spec.clusterIP}'
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      loop: ["{{ es_name }}-es-http", "{{ kibana_name }}-kb-http"]
+      register: svc_ips
+      changed_when: false
+
+    - name: Set Elasticsearch API facts
+      set_fact:
+        es_api: "http://{{ svc_ips.results[0].stdout }}:9200"
+        kb_api: "http://{{ svc_ips.results[1].stdout }}:5601"
+        elastic_password: "{{ elastic_pw_b64.stdout | b64decode }}"
+      no_log: true
+
+    - name: Elasticsearch setup (ILM retention, replicas 0)
+      uri:
+        url: "{{ es_api }}/{{ item.path }}"
+        method: PUT
+        body_format: json
+        body: "{{ item.body }}"
+        url_username: elastic
+        url_password: "{{ elastic_password }}"
+        force_basic_auth: true
+        status_code: [200]
+      loop:
+        # logs-*.otel-* (Alloy route): built-in ILM policy "logs" never deletes.
+        # Hook: component template logs-otel@custom (composed by logs-otel@template)
+        - path: _ilm/policy/logs-retention
+          body:
+            policy:
+              phases:
+                hot:    {actions: {rollover: {max_age: 1d, max_primary_shard_size: 2gb}}}
+                delete: {min_age: "{{ log_retention_days }}d", actions: {delete: {}}}
+        - path: "_component_template/logs-otel@custom"
+          body:
+            template:
+              settings: {index.lifecycle.name: logs-retention, index.number_of_replicas: 0}
+        # <prefix>-YYYY.MM.DD (Fluent Bit route): daily indices, delete by age
+        - path: "_ilm/policy/{{ fluent_bit_index_prefix }}-retention"
+          body:
+            policy:
+              phases:
+                delete: {min_age: "{{ log_retention_days }}d", actions: {delete: {}}}
+        - path: "_index_template/{{ fluent_bit_index_prefix }}"
+          body:
+            index_patterns: ["{{ fluent_bit_index_prefix }}-*"]
+            priority: 200
+            template:
+              settings:
+                index.lifecycle.name: "{{ fluent_bit_index_prefix }}-retention"
+                index.number_of_replicas: 0
+        # Indices that already exist (re-runs, retention changes)
+        - path: "logs-*.otel-*/_settings?allow_no_indices=true&expand_wildcards=all"
+          body: {index.lifecycle.name: logs-retention, index.number_of_replicas: 0}
+        - path: "{{ fluent_bit_index_prefix }}-*/_settings?allow_no_indices=true"
+          body:
+            index.lifecycle.name: "{{ fluent_bit_index_prefix }}-retention"
+            index.number_of_replicas: 0
+      loop_control:
+        label: "PUT {{ item.path }}"
+
+    - name: Kibana data views
+      uri:
+        url: "{{ kb_api }}/api/data_views/data_view"
+        method: POST
+        body_format: json
+        headers:
+          kbn-xsrf: "true"
+        body:
+          override: true
+          data_view:
+            id: "{{ item.id }}"
+            name: "{{ item.name }}"
+            title: "{{ item.title }}"
+            timeFieldName: "@timestamp"
+        url_username: elastic
+        url_password: "{{ elastic_password }}"
+        force_basic_auth: true
+        status_code: [200]
+      loop:
+        - {id: logs-otel,  name: "Logs (Alloy / OTel)", title: "logs-*.otel-*"}
+        - {id: fluent-bit, name: "Logs (Fluent Bit)",   title: "{{ fluent_bit_index_prefix }}-*"}
+      loop_control:
+        label: "{{ item.name }} -> {{ item.title }}"
+
+    # ==========================================
+    # Wave 3: log shipper
+    # ==========================================
+    - name: "Wave 3 - apply log shipper"
+      command: kubectl apply -f {{ work_dir }}/{{ item.name }}-application.yaml
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      loop: "{{ logging_apps | selectattr('wave', 'equalto', 3) | list }}"
+      loop_control:
+        label: "{{ item.name }}"
+      register: w3
+      changed_when: "'created' in w3.stdout or 'configured' in w3.stdout"
+
+    # Switching shipper (alloy <-> fluent-bit, or -> none) removes the other one
+    - name: Remove the shipper that is no longer selected
+      command: kubectl delete application {{ item }} -n {{ argocd_namespace }} --ignore-not-found --wait=false
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      loop: "{{ ['otel-collector', 'fluent-bit'] | difference(logging_apps | map(attribute='name') | list) }}"
+      register: stale
+      changed_when: "'deleted' in stale.stdout"
+
+    - name: "Wave 3 - wait for shipper Synced/Healthy"
+      command: >
+        kubectl get application {{ item.name }} -n {{ argocd_namespace }}
+        -o jsonpath='{.status.sync.status}/{.status.health.status}'
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      loop: "{{ logging_apps | selectattr('wave', 'equalto', 3) | list }}"
+      loop_control:
+        label: "{{ item.name }}"
+      register: w3_status
+      until: w3_status.stdout == "Synced/Healthy"
+      retries: 40
+      delay: 15
+      changed_when: false
+
+    - name: Check that Alloy exports to the collector (log_shipper=alloy)
+      shell: >
+        kubectl get configmap -n grafana -l app.kubernetes.io/name=alloy
+        -o jsonpath='{.items[0].data.config\.alloy}' 2>/dev/null | grep -c es_gateway || true
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: alloy_export
+      changed_when: false
+      when: log_shipper == 'alloy'
+
+    - name: Tell how to switch Alloy on
+      debug:
+        msg:
+          - "otel-collector is ready, but Alloy is not sending to it yet."
+          - "Run:  ./terraform_main.sh <target> grafana   (grafana.yml detects the collector)"
+      when: log_shipper == 'alloy' and (alloy_export.stdout | trim) in ['', '0']
+
+    - name: Get pods with node placement
+      command: kubectl get pods -n {{ logging_namespace }} -o wide
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: logging_pods
+      changed_when: false
+
+    - name: Display pods
+      debug:
+        var: logging_pods.stdout_lines
+
+    - name: Get ArgoCD Applications
+      command: kubectl get applications -n {{ argocd_namespace }} -l stack=logging
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: argo_apps
+      changed_when: false
+
+    - name: Display ArgoCD Applications
+      debug:
+        var: argo_apps.stdout_lines
+
+    # ==========================================
+    # Cleanup
+    # ==========================================
+    - name: Remove work directory
+      file:
+        path: "{{ work_dir }}"
+        state: absent
+
+    # ==========================================
+    # Summary
+    # ==========================================
+    - name: Set access info
+      set_fact:
+        logging_access_info: |
+          ==========================================
+            Logging Installed (ArgoCD)
+          ==========================================
+
+          KIBANA {{ elasticsearch_version }}
+            URL:      https://{{ kibana_domain }}
+            Internal: http://{{ kibana_name }}-kb-http.{{ logging_namespace }}.svc:5601
+            Username: elastic
+            Password: kubectl get secret {{ es_name }}-es-elastic-user -n {{ logging_namespace }} -o jsonpath='{.data.elastic}' | base64 -d; echo
+            Data views:
+              Logs (Alloy / OTel)  ->  logs-*.otel-*
+              Logs (Fluent Bit)    ->  {{ fluent_bit_index_prefix }}-*
+
+          ELASTICSEARCH {{ elasticsearch_version }}  (no Ingress - in-cluster only)
+            Internal: {{ es_url }}
+            Data:     PVC elasticsearch-data-{{ es_name }}-es-default-0 ({{ es_pvc_size }}, {{ storage_class }})
+            Retention:{{ log_retention_days }} days (ILM logs-retention / {{ fluent_bit_index_prefix }}-retention)
+            Shipper user: log-writer  (Secret es-log-writer, role log_writer = write only)
+
+          LOG SHIPPER: {{ log_shipper }}
+          {% if log_shipper == 'alloy' %}
+            Alloy (grafana ns) --OTLP--> otel-collector.{{ logging_namespace }}.svc:4318 --> {{ es_url }}
+            Data stream: logs-alloy.otel-default
+          {% elif log_shipper == 'fluent-bit' %}
+            fluent-bit DaemonSet --> {{ es_url }}
+            Index: {{ fluent_bit_index_prefix }}-YYYY.MM.DD
+          {% endif %}
+
+          ARGOCD
+            kubectl get applications -n {{ argocd_namespace }} -l stack=logging
+
+          ==========================================
+            Verify Commands:
+          ==========================================
+          sudo k3s kubectl get elasticsearch,kibana -n {{ logging_namespace }}
+          sudo k3s kubectl get pods -n {{ logging_namespace }} -o wide
+          PW=$(sudo k3s kubectl get secret {{ es_name }}-es-elastic-user -n {{ logging_namespace }} -o jsonpath='{.data.elastic}' | base64 -d)
+          sudo k3s kubectl port-forward svc/{{ es_name }}-es-http 9200:9200 -n {{ logging_namespace }} &
+          curl -s -u "elastic:$PW" 'localhost:9200/_cluster/health?pretty'
+          curl -s -u "elastic:$PW" 'localhost:9200/_cat/indices/logs-*,{{ fluent_bit_index_prefix }}-*?v&expand_wildcards=all'
+          sudo k3s kubectl logs -n {{ operator_namespace }} statefulset/elastic-operator --tail=30
+          sudo k3s kubectl logs -n {{ logging_namespace }} deploy/otel-collector --tail=30
+          sudo k3s kubectl logs -n {{ logging_namespace }} ds/fluent-bit --tail=30
+
+          DNS / Cloudflare Tunnel: {{ kibana_domain }} -> Traefik (http://localhost:80)
+          ==========================================
+
+    - name: Display installation summary
+      debug:
+        msg: "{{ logging_access_info.split('\n') }}"
+
+    - name: Save access info to remote server
+      copy:
+        dest: /root/logging-access-info.txt
+        content: "{{ logging_access_info }}"
+        mode: "0600"
+
+    - name: Ensure local access-info directory exists
+      delegate_to: localhost
+      become: false
+      file:
+        path: "{{ (playbook_dir ~ '/../../access-info') | realpath }}"
+        state: directory
+        mode: "0755"
+
+    - name: Save access info to local machine (ansible-common/access-info/)
+      delegate_to: localhost
+      become: false
+      copy:
+        dest: "{{ (playbook_dir ~ '/../../access-info') | realpath }}/{{ inventory_hostname }}-logging-access-info.txt"
+        content: "{{ logging_access_info }}"
+        mode: "0644"

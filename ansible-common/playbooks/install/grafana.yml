@@ -92,9 +92,16 @@
     # Needs prometheus.yml (enableRemoteWriteReceiver: true is set there).
     # Sends Alloy self-metrics + app OTLP metrics to Prometheus.
     alloy_export_prometheus: true
-    # Alloy has NO native Elasticsearch exporter. It sends OTLP to an
-    # OpenTelemetry Collector (contrib/EDOT) that has the elasticsearch exporter.
-    alloy_export_otlp: false
+    # Alloy (v1.20) has NO Elasticsearch log exporter. It sends OTLP to the
+    # OpenTelemetry Collector that logging.yml deploys (ns logging), which
+    # writes to Elasticsearch. log_shipper (group_vars/all.yml):
+    #   alloy        -> always export
+    #   fluent-bit / none -> never export
+    #   unset (auto) -> export when Service otel-collector exists in "logging"
+    # So: install logging.yml first, then (re-)run this playbook.
+    alloy_export_otlp: >-
+      {{ (log_shipper | default('auto')) == 'alloy'
+         or ((log_shipper | default('auto')) == 'auto' and (otel_collector_present | default(false) | bool)) }}
     alloy_otlp_endpoint: "http://otel-collector.logging.svc:4318"
     # Namespaces whose logs are dropped before reaching Loki (regex alternation)
     alloy_drop_namespaces: "kube-node-lease"
@@ -419,8 +426,16 @@
       {% endif %}
       {% if alloy_export_otlp | bool %}
  
-      // 3c. -> Elasticsearch, via an OTel Collector (elasticsearch exporter)
+      // 3c. -> Elasticsearch, via the OTel Collector from logging.yml
+      //      Loki entry -> OTLP log record (labels become log attributes)
       otelcol.receiver.loki "to_otlp" {
+        output {
+          logs = [otelcol.processor.batch.to_es.input]
+        }
+      }
+
+      // batch: many log lines per OTLP request instead of one each
+      otelcol.processor.batch "to_es" {
         output {
           logs = [otelcol.exporter.otlphttp.es_gateway.input]
         }
@@ -720,6 +735,21 @@
         KUBECONFIG: "{{ kubeconfig_path }}"
       register: cluster_info
       changed_when: false
+
+    # Enables Alloy -> Elasticsearch export automatically (see alloy_export_otlp)
+    - name: Detect otel-collector from logging.yml
+      command: kubectl get svc otel-collector -n logging
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: otel_collector_svc
+      changed_when: false
+      failed_when: false
+      tags: [render]
+
+    - name: Set otel_collector_present
+      set_fact:
+        otel_collector_present: "{{ otel_collector_svc.rc | default(1) == 0 }}"
+      tags: [render]
  
     - name: Check ArgoCD Application CRD exists
       command: kubectl get crd applications.argoproj.io

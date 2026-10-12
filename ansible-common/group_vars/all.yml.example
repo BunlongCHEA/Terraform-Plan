@@ -5,3 +5,10 @@
 rancher_domain       : "<rancher.example.com>"
 admin_email          : "<admin@example.com>"
 argocd_domain         : "<argocd.example.com>"
+
+# Logging (playbooks/install/logging.yml + grafana.yml)
+kibana_domain        : "<kibana.example.com>"
+# alloy      = Alloy (grafana.yml) -> OTel Collector -> Elasticsearch  (recommended: one log tailer)
+# fluent-bit = Fluent Bit DaemonSet -> Elasticsearch
+# none       = Elasticsearch + Kibana only
+log_shipper          : "alloy"

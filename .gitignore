@@ -13,6 +13,7 @@ test-kubeconfig.yaml
 kubeconfig-base64.txt
 .vscode
 /ansible-common/access-info/*
+/ansible-common/common/deploy.env
 /ansible-common/group_vars/all.yml
 
 /gke/terraform.tfvars

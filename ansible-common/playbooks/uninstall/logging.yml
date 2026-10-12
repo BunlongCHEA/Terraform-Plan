@@ -1,0 +1,138 @@
+---
+# Removes the logging stack installed by install/logging.yml:
+#   ArgoCD apps (label stack=logging): otel-collector / fluent-bit, kibana,
+#   elasticsearch, eck-operator  ->  namespaces logging + elastic-system,
+#   Elasticsearch data PVC, ECK CRDs, webhook, cluster RBAC, access info.
+# Order: shippers + Kibana/ES first (the operator must still be running to
+# clean up their pods), then the operator, then CRDs.
+- name: Uninstall Logging (Elasticsearch + Kibana + log shipper)
+  hosts: os_servers[0]
+  become: true
+  gather_facts: false
+  vars:
+    kubeconfig_path: /etc/rancher/k3s/k3s.yaml
+    argocd_namespace: argocd
+    logging_namespace: logging
+    operator_namespace: elastic-system
+
+  tasks:
+    - name: Delete shipper, Kibana and Elasticsearch Applications (cascade)
+      command: >
+        kubectl delete application {{ item }} -n {{ argocd_namespace }}
+        --ignore-not-found --wait=true --timeout=180s
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      loop: [otel-collector, fluent-bit, kibana, elasticsearch]
+      register: app_delete
+      changed_when: "'deleted' in app_delete.stdout"
+      failed_when: false
+
+    - name: Delete eck-operator Application (cascade, removes operator + CRDs)
+      command: >
+        kubectl delete application eck-operator -n {{ argocd_namespace }}
+        --ignore-not-found --wait=true --timeout=180s
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: op_delete
+      changed_when: "'deleted' in op_delete.stdout"
+      failed_when: false
+
+    # Covers a dead/half-removed ArgoCD (nothing processes the finalizer)
+    - name: Force-remove logging Applications still stuck on their finalizer
+      shell: |
+        for a in $(kubectl get applications -n {{ argocd_namespace }} -l stack=logging -o name 2>/dev/null); do
+          kubectl patch "$a" -n {{ argocd_namespace }} --type merge -p '{"metadata":{"finalizers":null}}'
+          kubectl delete "$a" -n {{ argocd_namespace }} --wait=false
+        done
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: app_force
+      changed_when: "'deleted' in app_force.stdout"
+      failed_when: false
+
+    - name: Delete leftover Elasticsearch / Kibana resources
+      shell: |
+        kubectl delete kibana,elasticsearch --all -n {{ logging_namespace }} --wait=false 2>/dev/null
+        kubectl delete all --all -n {{ logging_namespace }} --wait=false
+        true
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: false
+      failed_when: false
+
+    - name: Delete PVCs (Elasticsearch data)
+      command: kubectl delete pvc --all -n {{ logging_namespace }} --timeout=120s
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: pvc_delete
+      changed_when: "'deleted' in pvc_delete.stdout"
+      failed_when: false
+
+    - name: Delete namespaces
+      command: kubectl delete namespace {{ item }} --ignore-not-found --timeout=120s
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      loop: ["{{ logging_namespace }}", "{{ operator_namespace }}"]
+      register: ns_delete
+      changed_when: "'deleted' in ns_delete.stdout"
+      failed_when: false
+
+    - name: Force-finalize namespaces still Terminating
+      shell: |
+        if kubectl get ns {{ item }} >/dev/null 2>&1; then
+          kubectl get ns {{ item }} -o json \
+            | python3 -c 'import json,sys;d=json.load(sys.stdin);d["spec"]["finalizers"]=[];print(json.dumps(d))' \
+            | kubectl replace --raw /api/v1/namespaces/{{ item }}/finalize -f - >/dev/null && echo finalized
+        fi
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      loop: ["{{ logging_namespace }}", "{{ operator_namespace }}"]
+      register: ns_force
+      changed_when: "'finalized' in ns_force.stdout"
+      failed_when: false
+
+    # CRDs are cluster-wide; deleting them removes every ECK resource everywhere
+    - name: Delete ECK CRDs, webhook and cluster RBAC
+      shell: |
+        kubectl get crd -o name | grep '\.k8s\.elastic\.co$' | xargs -r kubectl delete --timeout=120s
+        kubectl delete validatingwebhookconfiguration elastic-operator.{{ operator_namespace }}.k8s.elastic.co --ignore-not-found
+        kubectl get clusterrole,clusterrolebinding -o name | grep -E '/(elastic-operator.*|fluent-bit)$' | xargs -r kubectl delete
+        true
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: crd_delete
+      changed_when: "'deleted' in crd_delete.stdout"
+      failed_when: false
+
+    - name: Remove access info from remote server
+      file:
+        path: /root/logging-access-info.txt
+        state: absent
+
+    - name: Remove access info from local machine
+      delegate_to: localhost
+      become: false
+      file:
+        path: "{{ (playbook_dir ~ '/../../access-info') | realpath }}/{{ inventory_hostname }}-logging-access-info.txt"
+        state: absent
+
+    - name: Verify nothing is left
+      shell: |
+        kubectl get applications -n {{ argocd_namespace }} -l stack=logging 2>&1
+        kubectl get namespace {{ logging_namespace }} {{ operator_namespace }} 2>&1 || true
+        kubectl get crd 2>/dev/null | grep k8s.elastic.co || echo "No ECK CRDs"
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: verify
+      changed_when: false
+
+    - name: Display uninstall summary
+      debug:
+        msg:
+          - "=========================================="
+          - "  Logging Uninstalled"
+          - "=========================================="
+          - "{{ verify.stdout_lines }}"
+          - "Grafana stack untouched. Re-run grafana.yml so Alloy stops exporting"
+          - "to the removed otel-collector (it auto-detects the collector)."
+          - "Manual: remove kibana.bunlong.uk from DNS / Cloudflare Tunnel if unused"
