@@ -456,25 +456,115 @@
     # ==========================================
     # Summary
     # ==========================================
+    - name: "[CONTROLLER] Collect Jenkins facts for the summary"
+      shell: |
+        set -o pipefail
+        echo "version=$(jenkins --version 2>/dev/null || dpkg-query -W -f='${Version}' jenkins)"
+        echo "java=$(java -version 2>&1 | head -n1)"
+        echo "plugins=$(find {{ jenkins_home }}/plugins -maxdepth 1 -name '*.jpi' | wc -l)"
+        echo "service=$(systemctl is-active jenkins)"
+        echo "agents=$(KUBECONFIG={{ kubeconfig_path }} kubectl get nodes -l {{ jenkins_agent_label }}=true -o jsonpath='{.items[*].metadata.name}')"
+      args:
+        executable: /bin/bash
+      register: jenkins_facts_raw
+      changed_when: false
+      when: is_controller
+
+    - name: "[CONTROLLER] Build access info"
+      set_fact:
+        jenkins_access_info: |
+          ===========================================================
+          JENKINS ACCESS INFORMATION  (generated {{ ansible_date_time.iso8601 }})
+          ===========================================================
+
+          URL (LAN)        : http://{{ jenkins_controller_ip }}:{{ jenkins_port }}/
+          URL (public)     : {{ jenkins_public_url }}
+          Username         : {{ jenkins_admin_username }}
+          Password         : {{ jenkins_admin_password }}
+          (change it only in group_vars/all.yml + re-run: JCasC resets it on every restart)
+
+          Jenkins          : {{ jenkins_facts_raw.stdout_lines[0].split('=', 1)[1] }} ({{ jenkins_facts_raw.stdout_lines[3].split('=', 1)[1] }})
+          Java             : {{ jenkins_facts_raw.stdout_lines[1].split('=', 1)[1] }}
+          Plugins          : {{ jenkins_facts_raw.stdout_lines[2].split('=', 1)[1] }} installed
+          Controller       : {{ jenkins_controller }} ({{ jenkins_controller_ip }}) — systemd, 0 executors
+          Agent node(s)    : {{ jenkins_facts_raw.stdout_lines[4].split('=', 1)[1] | default('NONE LABELLED!', true) }}  (label {{ jenkins_agent_label }}=true)
+          Agent namespace  : {{ jenkins_agent_namespace }}   (max {{ jenkins_agent_max_pods }} build Pods)
+          CBS namespaces   : {{ cbs_namespaces | join(', ') }}
+
+          -----------------------------------------------------------
+          Files
+          -----------------------------------------------------------
+          JCasC config     : {{ jenkins_home }}/casc/jenkins.yaml
+          Admin env file   : /etc/jenkins/casc.env (root only)
+          systemd override : /etc/systemd/system/jenkins.service.d/override.conf
+          K8s kubeconfig   : {{ jenkins_home }}/.kube/config (namespace {{ jenkins_agent_namespace }})
+          Deploy kubeconfigs (upload to Jenkins as "Secret file"):
+            {{ jenkins_output_dir }}/kubeconfig-cbs-uat   → ID kubeconfig-cbs-uat
+            {{ jenkins_output_dir }}/kubeconfig-cbs-prod  → ID kubeconfig-cbs-prod
+
+          -----------------------------------------------------------
+          Credentials to create (Manage Jenkins → Credentials → System → Global)
+          -----------------------------------------------------------
+            gitlab-repo           Username+Password  GitLab user + PAT (read_repository)
+            gitlab-registry-push  Username+Password  deploy token (read+write_registry)
+            gitlab-registry-pull  Username+Password  deploy token (read_registry)
+            kubeconfig-cbs-uat    Secret file        file above
+            kubeconfig-cbs-prod   Secret file        file above
+            cbs-uat-env           Secret file        filled deploy/cbs.env.example (uat)
+            cbs-prod-env          Secret file        filled deploy/cbs.env.example (prod)
+
+          -----------------------------------------------------------
+          Cloudflare Tunnel (optional public URL)
+          -----------------------------------------------------------
+            Public hostname : jenkins.<your-domain>  → Service http://localhost:{{ jenkins_port }}
+            Protect it with a Cloudflare Access policy. Set jenkins_domain in group_vars.
+
+          -----------------------------------------------------------
+          Useful commands (on {{ jenkins_controller }})
+          -----------------------------------------------------------
+            sudo systemctl status jenkins
+            sudo journalctl -u jenkins -f                    # live log
+            sudo journalctl -u jenkins --since "10 min ago"  # recent log
+            sudo systemctl restart jenkins
+            sudo kubectl -n {{ jenkins_agent_namespace }} get pods -w     # build Pods
+            sudo kubectl get nodes -L {{ jenkins_agent_label }}
+          ===========================================================
+      no_log: true
+      when: is_controller
+
     - name: Display Jenkins summary
       debug:
-        msg:
-          - "==========================================================="
-          - "          JENKINS INSTALLATION COMPLETE"
-          - "==========================================================="
-          - "  URL (LAN)      : http://{{ jenkins_controller_ip }}:{{ jenkins_port }}/"
-          - "  URL (public)   : {{ jenkins_public_url }}"
-          - "  Login          : {{ jenkins_admin_username }} / (jenkins_admin_password from group_vars)"
-          - "  Controller     : {{ jenkins_controller }} (systemd, 0 executors)"
-          - "  Agent Pods on  : {{ jenkins_agent_nodes | join(', ') }}  (label {{ jenkins_agent_label }}=true, ns {{ jenkins_agent_namespace }})"
-          - "  CBS namespaces : {{ cbs_namespaces | join(', ') }}"
-          - ""
-          - "  Upload these as Jenkins 'Secret file' credentials:"
-          - "    {{ jenkins_output_dir }}/kubeconfig-cbs-uat   → ID kubeconfig-cbs-uat"
-          - "    {{ jenkins_output_dir }}/kubeconfig-cbs-prod  → ID kubeconfig-cbs-prod"
-          - "  Then follow docs/CI-CD.md in the SpringBoot-Core-Banking repo."
-          - "==========================================================="
-      run_once: true
+        msg: "{{ jenkins_access_info.split('\n') }}"
+      when: is_controller
+
+    - name: "[CONTROLLER] Save access information on the server (/root/jenkins-access-info.txt)"
+      copy:
+        dest: /root/jenkins-access-info.txt
+        content: "{{ jenkins_access_info }}"
+        owner: root
+        group: root
+        mode: "0600"
+      no_log: true
+      when: is_controller
+
+    - name: "[LOCAL] Ensure local access-info directory exists"
+      file:
+        path: "{{ (playbook_dir ~ '/../../access-info') | realpath }}"
+        state: directory
+        mode: "0700"
+      delegate_to: localhost
+      become: false
+      when: is_controller
+
+    - name: "[LOCAL] Save access information to your machine (ansible-common/access-info/, git-ignored)"
+      copy:
+        dest: "{{ (playbook_dir ~ '/../../access-info') | realpath }}/{{ inventory_hostname }}-jenkins-access-info.txt"
+        content: "{{ jenkins_access_info }}"
+        mode: "0600"
+      delegate_to: localhost
+      become: false
+      no_log: true
+      when: is_controller
 
   handlers:
     - name: Restart Jenkins
