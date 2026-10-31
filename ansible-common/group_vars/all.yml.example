@@ -18,4 +18,4 @@ log_shipper          : "alloy"
 # Generate:  openssl rand -base64 18
 jenkins_admin_password : "<CHANGE_ME>"
 # Optional — public URL through Cloudflare Tunnel (route → http://localhost:8080)
-# jenkins_domain       : "jenkins.example.com"
+jenkins_domain       : "jenkins.example.com"
