@@ -1,0 +1,49 @@
+# =============================================================
+# Jenkins Configuration as Code — rendered by playbooks/install/jenkins.yml
+# to {{ jenkins_home }}/casc/jenkins.yaml. Re-run the playbook to change it;
+# edits made here by hand are overwritten.
+#
+# NOT managed here on purpose: credentials and jobs. Create those in the UI
+# (Manage Jenkins → Credentials / New Item) so you can change secrets any
+# time without touching Ansible.
+#
+# ${JENKINS_ADMIN_USER} / ${JENKINS_ADMIN_PASSWORD} come from
+# /etc/jenkins/casc.env (root-only), not from this file.
+# =============================================================
+jenkins:
+  systemMessage: "CBS CI/CD — controller on {{ inventory_hostname }}, agents are Pods on K3s (managed by Ansible)"
+  # The controller runs NO builds. Every build runs in a Pod on the agent node.
+  numExecutors: 0
+  mode: EXCLUSIVE
+
+  securityRealm:
+    local:
+      allowsSignup: false
+      users:
+        - id: "${JENKINS_ADMIN_USER}"
+          name: "Administrator"
+          password: "${JENKINS_ADMIN_PASSWORD}"
+
+  # Single-admin lab setup. For a team, switch to matrix-auth / role-strategy.
+  authorizationStrategy:
+    loggedInUsersCanDoAnything:
+      allowAnonymousRead: false
+
+  clouds:
+    - kubernetes:
+        name: "k3s"
+        # serverUrl left empty on purpose → the plugin reads
+        # {{ jenkins_home }}/.kube/config (ServiceAccount jenkins-controller)
+        namespace: "{{ jenkins_agent_namespace }}"
+        jenkinsUrl: "http://{{ jenkins_controller_ip }}:{{ jenkins_port }}/"
+        webSocket: true            # agents connect over the HTTP port, no TCP 50000 needed
+        containerCapStr: "{{ jenkins_agent_max_pods }}"   # max parallel build Pods
+        maxRequestsPerHostStr: "32"
+        connectTimeout: 10
+        readTimeout: 30
+        waitForPodSec: 600
+
+unclassified:
+  location:
+    url: "{{ jenkins_public_url }}"
+    adminAddress: "{{ admin_email | default('admin@example.com') }}"

@@ -4,7 +4,7 @@
 #
 #   target:  digitalocean | gke | raspberrypi
 #   command: all | init | validate | plan | apply | output | destroy | test |
-#            ansible | rancher | argocd | prometheus | grafana | logging |
+#            ansible | rancher | argocd | prometheus | grafana | logging | jenkins |
 #            install | uninstall | help
 #
 # Examples:
@@ -34,7 +34,7 @@ case "$TARGET" in
 Usage: $0 <target> <command>
   target:  digitalocean | gke | raspberrypi
   command: all | init | validate | plan | apply | output | destroy | test |
-           ansible | rancher | argocd | prometheus | grafana | logging |
+           ansible | rancher | argocd | prometheus | grafana | logging | jenkins |
            install | uninstall | help
 EOF
     exit 0
@@ -218,8 +218,9 @@ install_menu() {
   echo "  3) ArgoCD"
   echo "  4) Monitoring (Prometheus / Grafana stack) ->"
   echo "  5) Logging (Elasticsearch + Kibana + Alloy/Fluent Bit shipper)"
-  echo "  6) All of the above"
-  echo "  7) Skip"
+  echo "  6) Jenkins (controller on first host, build agents as Pods on the others)"
+  echo "  7) All of the above (1-5, without Jenkins)"
+  echo "  8) Skip"
   read -p "Enter choice: " c
   case "$c" in
     1) run_playbook "Install Ansible"       "$P_INSTALL/ansible.yml" ;;
@@ -227,7 +228,8 @@ install_menu() {
     3) run_playbook "Install ArgoCD"        "$P_INSTALL/argocd.yml" ;;
     4) install_monitoring_menu ;;
     5) run_playbook "Install Logging"       "$P_INSTALL/logging.yml" ;;
-    6) run_playbook "Install Ansible"       "$P_INSTALL/ansible.yml"
+    6) run_playbook "Install Jenkins"       "$P_INSTALL/jenkins.yml" ;;
+    7) run_playbook "Install Ansible"       "$P_INSTALL/ansible.yml"
        run_rancher
        run_playbook "Install ArgoCD"        "$P_INSTALL/argocd.yml"
        run_playbook "Install Prometheus"    "$P_INSTALL/prometheus.yml"
@@ -235,7 +237,7 @@ install_menu() {
        # on when it finds logging.yml's otel-collector.
        run_playbook "Install Logging"       "$P_INSTALL/logging.yml"
        run_playbook "Install Grafana stack" "$P_INSTALL/grafana.yml" ;;
-    7) print_info "Skipping software installation" ;;
+    8) print_info "Skipping software installation" ;;
     *) print_error "Invalid choice" ;;
   esac
 }
@@ -247,7 +249,8 @@ uninstall_menu() {
   echo "  3) ArgoCD"
   echo "  4) Rancher & K3s (WARNING: removes entire cluster)"
   echo "  5) Everything (Logging + Grafana stack + Prometheus + ArgoCD + Rancher)"
-  echo "  6) Back"
+  echo "  6) Jenkins (controller + agent namespace; keeps cbs-uat/cbs-prod)"
+  echo "  7) Back"
   read -p "Enter choice: " c
   case "$c" in
     1) uninstall_monitoring_menu ;;
@@ -267,7 +270,8 @@ uninstall_menu() {
          run_playbook "Uninstall ArgoCD"        "$P_UNINSTALL/argocd.yml"
          run_playbook "Uninstall Rancher"       "$P_UNINSTALL/rancher.yml"
        fi ;;
-    6) return 0 ;;
+    6) run_playbook "Uninstall Jenkins"    "$P_UNINSTALL/jenkins.yml" ;;
+    7) return 0 ;;
     *) print_error "Invalid choice" ;;
   esac
 }
@@ -311,6 +315,7 @@ Usage: $0 <target> <command>
     prometheus     Install Prometheus (kube-prometheus-stack, via ArgoCD)
     grafana        Install Grafana + Loki + Tempo + Alloy (via ArgoCD)
     logging        Install Elasticsearch + Kibana + log shipper (ECK, via ArgoCD)
+    jenkins        Install Jenkins controller (first host) + K8s build agents (other hosts)
     install        Show install menu
     uninstall      Show uninstall menu
     help           Show this help
@@ -350,6 +355,7 @@ case "$COMMAND" in
   prometheus) run_playbook "Install Prometheus"    "$P_INSTALL/prometheus.yml" ;;
   grafana)    run_playbook "Install Grafana stack" "$P_INSTALL/grafana.yml" ;;
   logging)    run_playbook "Install Logging"       "$P_INSTALL/logging.yml" ;;
+  jenkins)    run_playbook "Install Jenkins"       "$P_INSTALL/jenkins.yml" ;;
   install)    install_menu ;;
   uninstall)  uninstall_menu ;;
   help|*)     show_help ;;

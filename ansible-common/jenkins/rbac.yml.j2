@@ -1,0 +1,104 @@
+# =============================================================
+# Rendered by playbooks/install/jenkins.yml → applied on the first master.
+#
+#  namespace {{ jenkins_agent_namespace }}  : build agent Pods live here
+#    SA jenkins-controller → may only create/delete Pods in this namespace
+#
+#  namespaces {{ cbs_namespaces | join(', ') }} : the CBS app (UAT / PROD)
+#    SA cbs-deployer (one per namespace) → "admin" inside ITS namespace only
+#    Jenkins gets one kubeconfig per namespace, so the UAT credential can
+#    never touch PROD.
+# =============================================================
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ jenkins_agent_namespace }}
+  labels:
+    app.kubernetes.io/managed-by: ansible
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: jenkins-controller
+  namespace: {{ jenkins_agent_namespace }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: jenkins-agent-launcher
+  namespace: {{ jenkins_agent_namespace }}
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["create", "delete", "get", "list", "patch", "update", "watch"]
+  - apiGroups: [""]
+    resources: ["pods/exec"]
+    verbs: ["create", "get"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: jenkins-agent-launcher
+  namespace: {{ jenkins_agent_namespace }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: jenkins-agent-launcher
+subjects:
+  - kind: ServiceAccount
+    name: jenkins-controller
+    namespace: {{ jenkins_agent_namespace }}
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: jenkins-controller-token
+  namespace: {{ jenkins_agent_namespace }}
+  annotations:
+    kubernetes.io/service-account.name: jenkins-controller
+type: kubernetes.io/service-account-token
+{% for ns in cbs_namespaces %}
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ ns }}
+  labels:
+    app.kubernetes.io/managed-by: ansible
+    app.kubernetes.io/part-of: cbs
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: cbs-deployer
+  namespace: {{ ns }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: cbs-deployer-admin
+  namespace: {{ ns }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: admin          # built-in: full control of THIS namespace, nothing cluster-wide
+subjects:
+  - kind: ServiceAccount
+    name: cbs-deployer
+    namespace: {{ ns }}
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: cbs-deployer-token
+  namespace: {{ ns }}
+  annotations:
+    kubernetes.io/service-account.name: cbs-deployer
+type: kubernetes.io/service-account-token
+{% endfor %}

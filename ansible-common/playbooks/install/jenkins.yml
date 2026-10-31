@@ -1,0 +1,458 @@
+---
+# ===========================================
+# Ansible Playbook: Jenkins for CBS CI/CD
+#
+#   Controller : first host in inventory (pi5, the K3s master) — installed
+#                DIRECTLY on the OS (apt + systemd), NOT inside Kubernetes.
+#   Agents     : throw-away Pods on the K3s worker node(s) (k8), launched
+#                by the Jenkins Kubernetes plugin — one Pod per build, so
+#                builds scale out instead of queueing on the Pi.
+#
+# What it does
+#   1. [all]        facts; [agent nodes] cache dirs /var/lib/jenkins-cache
+#   2. [controller] Java + Jenkins LTS (apt repo), plugins, JCasC, systemd override
+#   3. [controller] K3s: namespaces jenkins / cbs-uat / cbs-prod, ServiceAccounts,
+#                   RBAC, node label cbs.ci/agent=true on the agent node(s)
+#   4. [controller] kubeconfig for Jenkins (launch Pods) + one kubeconfig per CBS
+#                   namespace, fetched to <target>/output/jenkins/ for upload
+#                   into Jenkins as Secret-file credentials
+#
+# Run:   ./terraform_main.sh raspberrypi jenkins
+# Needs: K3s installed (./terraform_main.sh raspberrypi rancher → option 2 multi-node),
+#        jenkins_admin_password in group_vars/all.yml
+# ===========================================
+
+- name: Install Jenkins controller (pi5) + Kubernetes agents (k8)
+  hosts: os_servers
+  become: true
+  gather_facts: true
+  vars_files:
+    - "{{ playbook_dir }}/../../common/versions.yml"
+  vars:
+    kubeconfig_path: /etc/rancher/k3s/k3s.yaml
+    jenkins_files_dir: "{{ playbook_dir }}/../../jenkins"
+
+    first_master: "{{ groups['os_servers'][0] }}"
+    jenkins_controller: "{{ first_master }}"
+    is_controller: "{{ inventory_hostname == jenkins_controller }}"
+    # Agent Pods run on every host except the controller (single node: on itself)
+    jenkins_agent_nodes: "{{ groups['os_servers'][1:] if (groups['os_servers'] | length) > 1 else groups['os_servers'] }}"
+    is_agent_node: "{{ inventory_hostname in jenkins_agent_nodes }}"
+
+    jenkins_home: /var/lib/jenkins
+    jenkins_port: 8080
+    jenkins_heap: "1g"                 # controller heap; Pi 5 shares RAM with K3s + Rancher
+    jenkins_agent_max_pods: 3          # parallel builds on the agent node(s)
+    jenkins_agent_namespace: jenkins
+    cbs_namespaces: [cbs-uat, cbs-prod]
+    jenkins_agent_label: "cbs.ci/agent"
+    jenkins_admin_username: "admin"
+    # jenkins_admin_password  → REQUIRED, set in group_vars/all.yml
+    # jenkins_domain          → optional, e.g. jenkins.bunlong.uk (Cloudflare Tunnel)
+
+    jenkins_controller_ip: "{{ hostvars[jenkins_controller]['ansible_default_ipv4']['address'] }}"
+    jenkins_public_url: "{{ ('https://' ~ jenkins_domain ~ '/') if (jenkins_domain | default('') | length > 0) else ('http://' ~ jenkins_controller_ip ~ ':' ~ jenkins_port ~ '/') }}"
+    jenkins_output_dir: "{{ inventory_dir }}/jenkins"   # on YOUR machine: <target>/output/jenkins
+    jenkins_tools_dir: /opt/jenkins-tools
+    # Token Secrets created by rbac.yml.j2 (first = controller, rest = one per CBS namespace)
+    sa_token_items:
+      - {ns: "{{ jenkins_agent_namespace }}", secret: jenkins-controller-token}
+      - {ns: "{{ cbs_namespaces[0] }}", secret: cbs-deployer-token}
+      - {ns: "{{ cbs_namespaces[1] }}", secret: cbs-deployer-token}
+
+  tasks:
+    # ==========================================
+    # Pre-flight
+    # ==========================================
+    - name: Check required variables
+      assert:
+        that:
+          - jenkins_admin_password is defined
+          - jenkins_admin_password | length >= 12
+          - "\"'\" not in jenkins_admin_password"
+          - "'\\\\' not in jenkins_admin_password"
+          - "'\\n' not in jenkins_admin_password"
+        fail_msg: "Set jenkins_admin_password in <target>/group_vars/all.yml: min 12 chars, no single quote ('), backslash or newline"
+      run_once: true
+
+    - name: "[CONTROLLER] Only Debian/Ubuntu is supported for the controller"
+      assert:
+        that: ansible_os_family == "Debian"
+        fail_msg: "Jenkins controller playbook supports Debian/Ubuntu (Raspberry Pi OS / Ubuntu) only"
+      when: is_controller
+
+    - name: "[CONTROLLER] Verify K3s is running"
+      command: kubectl get nodes -o wide
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: k3s_nodes
+      changed_when: false
+      when: is_controller
+
+    - name: "[CONTROLLER] Show cluster nodes"
+      debug:
+        var: k3s_nodes.stdout_lines
+      when: is_controller
+
+    # ==========================================
+    # Agent node(s): cache folders used by the build Pods (hostPath)
+    # ==========================================
+    - name: "[AGENT] Create build cache folders"
+      file:
+        path: "/var/lib/jenkins-cache/{{ item }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+      loop: [m2, trivy, bin]
+      when: is_agent_node
+
+    # ==========================================
+    # Controller: Java + Jenkins LTS
+    # ==========================================
+    - name: "[CONTROLLER] Check whether Java 21 is packaged for this OS"
+      command: apt-cache show openjdk-21-jre-headless
+      register: java21_pkg
+      changed_when: false
+      failed_when: false
+      when: is_controller
+
+    - name: "[CONTROLLER] Install Java (21, or 17 on older Debian) + fontconfig"
+      apt:
+        name:
+          - fontconfig
+          - "{{ 'openjdk-21-jre-headless' if java21_pkg.rc == 0 else 'openjdk-17-jre-headless' }}"
+          - ca-certificates
+          - curl
+          - gnupg
+        state: present
+        update_cache: true
+        cache_valid_time: 3600
+      when: is_controller
+
+    - name: "[CONTROLLER] Create /etc/apt/keyrings"
+      file:
+        path: /etc/apt/keyrings
+        state: directory
+        mode: "0755"
+      when: is_controller
+
+    - name: "[CONTROLLER] Add Jenkins apt key (LTS / debian-stable)"
+      get_url:
+        url: "{{ jenkins_apt_key_url }}"
+        dest: /etc/apt/keyrings/jenkins-keyring.asc
+        mode: "0644"
+        force: true
+      when: is_controller
+
+    - name: "[CONTROLLER] Add Jenkins LTS apt repository"
+      apt_repository:
+        repo: "deb [signed-by=/etc/apt/keyrings/jenkins-keyring.asc] https://pkg.jenkins.io/debian-stable binary/"
+        filename: jenkins
+        state: present
+        update_cache: true
+      when: is_controller
+
+    - name: "[CONTROLLER] Install Jenkins"
+      apt:
+        name: "{{ 'jenkins' if jenkins_version == 'latest' else 'jenkins=' ~ jenkins_version }}"
+        state: present
+        allow_downgrade: false
+      register: jenkins_pkg
+      when: is_controller
+
+    - name: "[CONTROLLER] Hold Jenkins package (upgrade on purpose, not by apt upgrade)"
+      dpkg_selections:
+        name: jenkins
+        selection: hold
+      when: is_controller
+
+    # ==========================================
+    # Controller: Kubernetes RBAC, namespaces, node label
+    # ==========================================
+    - name: "[CONTROLLER] Render RBAC / namespaces manifest"
+      template:
+        src: "{{ jenkins_files_dir }}/rbac.yml.j2"
+        dest: /tmp/jenkins-rbac.yml
+        mode: "0600"
+      when: is_controller
+
+    - name: "[CONTROLLER] Apply RBAC / namespaces"
+      command: kubectl apply -f /tmp/jenkins-rbac.yml
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: rbac_apply
+      changed_when: "'created' in rbac_apply.stdout or 'configured' in rbac_apply.stdout"
+      when: is_controller
+
+    - name: "[CONTROLLER] Label agent node(s) {{ jenkins_agent_label }}=true (matched by node IP)"
+      shell: |
+        set -euo pipefail
+        NODE=$(kubectl get nodes -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.status.addresses[?(@.type=="InternalIP")].address}{"\n"}{end}' \
+               | awk -v ip="{{ hostvars[item]['ansible_default_ipv4']['address'] }}" '$2==ip {print $1}')
+        [ -n "$NODE" ] || { echo "No K3s node with IP {{ hostvars[item]['ansible_default_ipv4']['address'] }} ({{ item }})"; exit 1; }
+        kubectl label node "$NODE" {{ jenkins_agent_label }}=true --overwrite
+      args:
+        executable: /bin/bash
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      loop: "{{ jenkins_agent_nodes }}"
+      register: label_result
+      changed_when: "'labeled' in label_result.stdout"
+      when: is_controller
+
+    - name: "[CONTROLLER] Wait for ServiceAccount tokens"
+      shell: |
+        kubectl -n {{ item.ns }} get secret {{ item.secret }} -o jsonpath='{.data.token}'
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: sa_tokens
+      until: sa_tokens.stdout | length > 0
+      retries: 20
+      delay: 3
+      changed_when: false
+      no_log: true
+      loop: "{{ sa_token_items }}"
+      loop_control:
+        label: "{{ item.ns }}/{{ item.secret }}"
+      when: is_controller
+
+    - name: "[CONTROLLER] Read cluster CA"
+      shell: |
+        kubectl -n {{ jenkins_agent_namespace }} get secret jenkins-controller-token -o jsonpath='{.data.ca\.crt}'
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: cluster_ca
+      changed_when: false
+      when: is_controller
+
+    # ==========================================
+    # Controller: Jenkins configuration
+    # ==========================================
+    - name: "[CONTROLLER] Create Jenkins folders"
+      file:
+        path: "{{ item }}"
+        state: directory
+        owner: jenkins
+        group: jenkins
+        mode: "0750"
+      loop:
+        - "{{ jenkins_home }}/.kube"
+        - "{{ jenkins_home }}/casc"
+        - "{{ jenkins_home }}/plugins"
+      when: is_controller
+
+    - name: "[CONTROLLER] Kubeconfig for Jenkins (launch agent Pods in namespace {{ jenkins_agent_namespace }})"
+      template:
+        src: "{{ jenkins_files_dir }}/kubeconfig.j2"
+        dest: "{{ jenkins_home }}/.kube/config"
+        owner: jenkins
+        group: jenkins
+        mode: "0600"
+      vars:
+        kc_server: "https://127.0.0.1:6443"          # controller runs on the K3s server itself
+        kc_ca: "{{ cluster_ca.stdout }}"
+        kc_user: jenkins-controller
+        kc_token: "{{ sa_tokens.results[0].stdout | b64decode }}"
+        kc_namespace: "{{ jenkins_agent_namespace }}"
+      no_log: true
+      notify: Restart Jenkins
+      when: is_controller
+
+    - name: "[CONTROLLER] Create /etc/jenkins and systemd drop-in folder"
+      file:
+        path: "{{ item }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+      loop:
+        - /etc/jenkins
+        - /etc/systemd/system/jenkins.service.d
+      when: is_controller
+
+    - name: "[CONTROLLER] Admin credentials for JCasC (root-only env file)"
+      copy:
+        dest: /etc/jenkins/casc.env
+        owner: root
+        group: root
+        mode: "0600"
+        content: |
+          JENKINS_ADMIN_USER='{{ jenkins_admin_username }}'
+          JENKINS_ADMIN_PASSWORD='{{ jenkins_admin_password }}'
+      no_log: true
+      notify: Restart Jenkins
+      when: is_controller
+
+    - name: "[CONTROLLER] Jenkins Configuration as Code (jenkins.yaml)"
+      template:
+        src: "{{ jenkins_files_dir }}/jenkins-casc.yaml.j2"
+        dest: "{{ jenkins_home }}/casc/jenkins.yaml"
+        owner: jenkins
+        group: jenkins
+        mode: "0640"
+      notify: Restart Jenkins
+      when: is_controller
+
+    - name: "[CONTROLLER] systemd override (heap, JCasC, no setup wizard)"
+      copy:
+        dest: /etc/systemd/system/jenkins.service.d/override.conf
+        mode: "0644"
+        content: |
+          # Managed by Terraform-Plan playbooks/install/jenkins.yml
+          [Service]
+          Environment="JAVA_OPTS=-Djava.awt.headless=true -Xmx{{ jenkins_heap }} -Djenkins.install.runSetupWizard=false"
+          Environment="JENKINS_PORT={{ jenkins_port }}"
+          Environment="CASC_JENKINS_CONFIG={{ jenkins_home }}/casc/jenkins.yaml"
+          Environment="KUBECONFIG={{ jenkins_home }}/.kube/config"
+          EnvironmentFile=/etc/jenkins/casc.env
+      notify: Restart Jenkins
+      when: is_controller
+
+    # ==========================================
+    # Controller: plugins
+    # ==========================================
+    - name: "[CONTROLLER] Create tools folder"
+      file:
+        path: "{{ jenkins_tools_dir }}"
+        state: directory
+        mode: "0755"
+      when: is_controller
+
+    - name: "[CONTROLLER] Download jenkins-plugin-manager {{ jenkins_plugin_manager_version }}"
+      get_url:
+        url: "https://github.com/jenkinsci/plugin-installation-manager-tool/releases/download/{{ jenkins_plugin_manager_version }}/jenkins-plugin-manager-{{ jenkins_plugin_manager_version }}.jar"
+        dest: "{{ jenkins_tools_dir }}/jenkins-plugin-manager-{{ jenkins_plugin_manager_version }}.jar"
+        mode: "0644"
+      when: is_controller
+
+    - name: "[CONTROLLER] Copy plugins.txt"
+      copy:
+        src: "{{ jenkins_files_dir }}/plugins.txt"
+        dest: "{{ jenkins_tools_dir }}/plugins.txt"
+        mode: "0644"
+      register: plugins_txt
+      when: is_controller
+
+    - name: "[CONTROLLER] Check whether plugins are already installed"
+      stat:
+        path: "{{ jenkins_home }}/plugins/configuration-as-code.jpi"
+      register: casc_plugin
+      when: is_controller
+
+    - name: "[CONTROLLER] Install / update plugins (takes a few minutes on a Pi)"
+      command: >
+        java -jar {{ jenkins_tools_dir }}/jenkins-plugin-manager-{{ jenkins_plugin_manager_version }}.jar
+        --war /usr/share/java/jenkins.war
+        --plugin-download-directory {{ jenkins_home }}/plugins
+        --plugin-file {{ jenkins_tools_dir }}/plugins.txt
+      become_user: jenkins
+      when:
+        - is_controller
+        - plugins_txt.changed or jenkins_pkg.changed or not casc_plugin.stat.exists
+      notify: Restart Jenkins
+
+    - name: "[CONTROLLER] Enable Jenkins"
+      systemd:
+        name: jenkins
+        enabled: true
+        daemon_reload: true
+      when: is_controller
+
+    - name: Apply pending restarts now
+      meta: flush_handlers
+
+    - name: "[CONTROLLER] Wait for Jenkins to answer"
+      uri:
+        url: "http://127.0.0.1:{{ jenkins_port }}/login"
+        status_code: 200
+      register: jenkins_up
+      until: jenkins_up.status == 200
+      retries: 60
+      delay: 10
+      when: is_controller
+
+    # ==========================================
+    # Deploy kubeconfigs (one per CBS namespace) → your machine
+    # ==========================================
+    - name: "[CONTROLLER] Render deploy kubeconfigs (server = in-cluster API, agents run inside K3s)"
+      template:
+        src: "{{ jenkins_files_dir }}/kubeconfig.j2"
+        dest: "/root/kubeconfig-{{ item.item.ns }}"
+        owner: root
+        group: root
+        mode: "0600"
+      vars:
+        kc_server: "https://kubernetes.default.svc"
+        kc_ca: "{{ cluster_ca.stdout }}"
+        kc_user: "cbs-deployer"
+        kc_token: "{{ item.stdout | b64decode }}"
+        kc_namespace: "{{ item.item.ns }}"
+      loop: "{{ sa_tokens.results[1:] }}"
+      loop_control:
+        label: "{{ item.item.ns }}"
+      no_log: true
+      when: is_controller
+
+    - name: "[LOCAL] Create {{ jenkins_output_dir }}"
+      file:
+        path: "{{ jenkins_output_dir }}"
+        state: directory
+        mode: "0700"
+      delegate_to: localhost
+      become: false
+      run_once: true
+
+    - name: "[CONTROLLER] Fetch deploy kubeconfigs to your machine"
+      fetch:
+        src: "/root/kubeconfig-{{ item }}"
+        dest: "{{ jenkins_output_dir }}/kubeconfig-{{ item }}"
+        flat: true
+      loop: "{{ cbs_namespaces }}"
+      when: is_controller
+
+    - name: "[LOCAL] Restrict kubeconfig permissions"
+      file:
+        path: "{{ jenkins_output_dir }}/kubeconfig-{{ item }}"
+        mode: "0600"
+      loop: "{{ cbs_namespaces }}"
+      delegate_to: localhost
+      become: false
+      run_once: true
+
+    - name: "[CONTROLLER] Remove temporary manifest"
+      file:
+        path: /tmp/jenkins-rbac.yml
+        state: absent
+      when: is_controller
+
+    # ==========================================
+    # Summary
+    # ==========================================
+    - name: Display Jenkins summary
+      debug:
+        msg:
+          - "==========================================================="
+          - "          JENKINS INSTALLATION COMPLETE"
+          - "==========================================================="
+          - "  URL (LAN)      : http://{{ jenkins_controller_ip }}:{{ jenkins_port }}/"
+          - "  URL (public)   : {{ jenkins_public_url }}"
+          - "  Login          : {{ jenkins_admin_username }} / (jenkins_admin_password from group_vars)"
+          - "  Controller     : {{ jenkins_controller }} (systemd, 0 executors)"
+          - "  Agent Pods on  : {{ jenkins_agent_nodes | join(', ') }}  (label {{ jenkins_agent_label }}=true, ns {{ jenkins_agent_namespace }})"
+          - "  CBS namespaces : {{ cbs_namespaces | join(', ') }}"
+          - ""
+          - "  Upload these as Jenkins 'Secret file' credentials:"
+          - "    {{ jenkins_output_dir }}/kubeconfig-cbs-uat   → ID kubeconfig-cbs-uat"
+          - "    {{ jenkins_output_dir }}/kubeconfig-cbs-prod  → ID kubeconfig-cbs-prod"
+          - "  Then follow docs/CI-CD.md in the SpringBoot-Core-Banking repo."
+          - "==========================================================="
+      run_once: true
+
+  handlers:
+    - name: Restart Jenkins
+      systemd:
+        name: jenkins
+        state: restarted
+        daemon_reload: true
+      when: is_controller

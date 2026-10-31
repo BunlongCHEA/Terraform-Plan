@@ -1,0 +1,97 @@
+---
+# ===========================================
+# Uninstall Jenkins (controller on first host + agent namespace/label).
+# KEEPS namespaces cbs-uat / cbs-prod (your running app + backups) unless
+#   -e cbs_purge_namespaces=true
+# KEEPS /var/lib/jenkins (jobs, credentials, build history) unless
+#   -e jenkins_purge_data=true
+# ===========================================
+- name: Uninstall Jenkins
+  hosts: os_servers
+  become: true
+  gather_facts: false
+  vars:
+    kubeconfig_path: /etc/rancher/k3s/k3s.yaml
+    first_master: "{{ groups['os_servers'][0] }}"
+    is_controller: "{{ inventory_hostname == first_master }}"
+    jenkins_agent_namespace: jenkins
+    jenkins_agent_label: "cbs.ci/agent"
+    cbs_namespaces: [cbs-uat, cbs-prod]
+    jenkins_purge_data: false
+    cbs_purge_namespaces: false
+
+  tasks:
+    - name: "[CONTROLLER] Stop and disable Jenkins"
+      systemd:
+        name: jenkins
+        state: stopped
+        enabled: false
+      failed_when: false
+      when: is_controller
+
+    - name: "[CONTROLLER] Unhold and remove Jenkins package"
+      shell: |
+        apt-mark unhold jenkins || true
+        DEBIAN_FRONTEND=noninteractive apt-get purge -y jenkins
+      failed_when: false
+      when: is_controller
+
+    - name: "[CONTROLLER] Remove Jenkins apt repo, key, override, env file, tools"
+      file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /etc/apt/sources.list.d/jenkins.list
+        - /etc/apt/keyrings/jenkins-keyring.asc
+        - /etc/systemd/system/jenkins.service.d
+        - /etc/jenkins/casc.env
+        - /opt/jenkins-tools
+        - /root/kubeconfig-cbs-uat
+        - /root/kubeconfig-cbs-prod
+      when: is_controller
+
+    - name: "[CONTROLLER] Remove Jenkins home (jobs, credentials, history)"
+      file:
+        path: /var/lib/jenkins
+        state: absent
+      when:
+        - is_controller
+        - jenkins_purge_data | bool
+
+    - name: "[CONTROLLER] Delete agent namespace"
+      command: kubectl delete namespace {{ jenkins_agent_namespace }} --ignore-not-found --timeout=120s
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      failed_when: false
+      when: is_controller
+
+    - name: "[CONTROLLER] Remove agent node label"
+      command: kubectl label nodes --all {{ jenkins_agent_label }}-
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      failed_when: false
+      when: is_controller
+
+    - name: "[CONTROLLER] Delete CBS namespaces (app + DB backups PVC!)"
+      command: kubectl delete namespace {{ item }} --ignore-not-found --timeout=180s
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      loop: "{{ cbs_namespaces }}"
+      failed_when: false
+      when:
+        - is_controller
+        - cbs_purge_namespaces | bool
+
+    - name: "[CONTROLLER] Reload systemd"
+      systemd:
+        daemon_reload: true
+      when: is_controller
+
+    - name: Summary
+      debug:
+        msg:
+          - "Jenkins removed from {{ first_master }}."
+          - "Jenkins data kept: {{ not (jenkins_purge_data | bool) }}  (/var/lib/jenkins)"
+          - "CBS namespaces kept: {{ not (cbs_purge_namespaces | bool) }}  ({{ cbs_namespaces | join(', ') }})"
+          - "Agent build caches remain on agent nodes in /var/lib/jenkins-cache (delete by hand if wanted)."
+      run_once: true

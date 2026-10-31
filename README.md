@@ -370,6 +370,7 @@ Run in this order (each step needs the previous one):
 ./terraform_main.sh <target> prometheus   # 4. Prometheus (kube-prometheus-stack via ArgoCD)
 ./terraform_main.sh <target> logging      # 5. Elasticsearch + Kibana + log shipper (via ArgoCD)
 ./terraform_main.sh <target> grafana      # 6. Grafana + Loki + Tempo + Alloy (via ArgoCD)
+./terraform_main.sh <target> jenkins      # 7. Jenkins controller on 1st host + K8s build agents (no ArgoCD needed)
 ```
 - `rancher` asks: **1)** single node (first host in inventory only) or **2)** multi-node (all hosts).
 - Install `logging` **before** `grafana` so Alloy auto-detects Elasticsearch and ships logs to it.
@@ -398,6 +399,7 @@ Runs: create dirs → `init` → `validate` → `plan` → asks **yes/no** → `
 | `init` | Create `output/`, `rancher/`; `terraform init -upgrade` |
 | `validate` | `terraform validate` |
 | `plan` | `terraform plan` — preview only |
+| `jenkins` | Jenkins LTS on the first host (systemd) + build-agent Pods on the other hosts, namespaces `cbs-uat`/`cbs-prod`, kubeconfigs in `<target>/output/jenkins/` — see SpringBoot-Core-Banking `docs/CI-CD.md` |
 | `apply` | `terraform apply -auto-approve` + show outputs |
 | `output` | Show Terraform outputs (IPs, hostnames) |
 | `test` | Ansible ping against `os_servers` |

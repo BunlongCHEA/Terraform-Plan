@@ -46,6 +46,16 @@ otel_collector_chart_version: "0.175.1"   # app otelcol-contrib 0.161.0
 # --- Kyverno (kyverno.yml) ---
 kyverno_version: "1.19.1"        # https://github.com/kyverno/kyverno/releases
 
+# --- Jenkins controller (jenkins.yml) ---
+# "latest" = newest LTS from https://pkg.jenkins.io/debian-stable (then apt-held).
+# To pin:  apt-cache madison jenkins   →  e.g. jenkins_version: "2.580.2"
+jenkins_version: "latest"
+jenkins_apt_key_url: "https://pkg.jenkins.io/debian-stable/jenkins.io-2023.key"
+# https://github.com/jenkinsci/plugin-installation-manager-tool/releases
+jenkins_plugin_manager_version: "2.13.2"
+# Trivy itself runs inside the CBS build Pod (SpringBoot-Core-Banking/ci/jenkins-agent-pod.yaml),
+# image ghcr.io/aquasecurity/trivy:0.75.0 — keep both in sync. NEVER use v0.69.4 (compromised, Mar 2026).
+
 # --- LazyTrivy + Trivy (lazytrivy.yml) ---
 # lazytrivy_version: "1.2.9"      # https://github.com/owenrumney/lazytrivy/releases
 # trivy_version: "0.74.0"         # https://github.com/aquasecurity/trivy/releases

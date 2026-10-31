@@ -1,0 +1,15 @@
+# Jenkins plugins installed by playbooks/install/jenkins.yml
+# (jenkins-plugin-manager resolves dependencies automatically).
+# Pin a version with  name:1.2.3  if an update ever breaks the pipeline.
+configuration-as-code
+kubernetes
+workflow-aggregator
+workflow-multibranch
+git
+credentials-binding
+plain-credentials
+timestamper
+junit
+pipeline-stage-view
+pipeline-graph-view
+ws-cleanup
