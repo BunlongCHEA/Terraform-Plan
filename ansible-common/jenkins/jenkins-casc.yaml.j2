@@ -45,5 +45,6 @@ jenkins:
 
 unclassified:
   location:
+    # Public login URL (Cloudflare Tunnel). Agents use jenkinsUrl above (LAN) instead.
     url: "{{ jenkins_public_url }}"
     adminAddress: "{{ admin_email | default('admin@example.com') }}"

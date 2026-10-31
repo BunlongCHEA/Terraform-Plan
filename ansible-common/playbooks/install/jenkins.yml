@@ -49,10 +49,16 @@
     jenkins_agent_label: "cbs.ci/agent"
     jenkins_admin_username: "admin"
     # jenkins_admin_password  → REQUIRED, set in group_vars/all.yml
-    # jenkins_domain          → optional, e.g. jenkins.bunlong.uk (Cloudflare Tunnel)
+    # jenkins_domain          → REQUIRED, e.g. jenkins.bunlong.uk — the login URL, published
+    #                            through Cloudflare Tunnel (route → http://localhost:8080)
 
     jenkins_controller_ip: "{{ hostvars[jenkins_controller]['ansible_default_ipv4']['address'] }}"
-    jenkins_public_url: "{{ ('https://' ~ jenkins_domain ~ '/') if (jenkins_domain | default('') | length > 0) else ('http://' ~ jenkins_controller_ip ~ ':' ~ jenkins_port ~ '/') }}"
+    # Login / "Jenkins URL" (links in the UI, emails, redirects) = the Cloudflare hostname.
+    # Agent Pods do NOT use it: they connect to http://<controller-ip>:8080 inside the LAN
+    # (see jenkins-casc.yaml.j2 → clouds.kubernetes.jenkinsUrl), so Cloudflare Access
+    # never blocks builds.
+    jenkins_public_url: "https://{{ jenkins_domain }}/"
+    jenkins_lan_url: "http://{{ jenkins_controller_ip }}:{{ jenkins_port }}/"
     jenkins_output_dir: "{{ inventory_dir }}/jenkins"   # on YOUR machine: <target>/output/jenkins
     jenkins_tools_dir: /opt/jenkins-tools
     # Token Secrets created by rbac.yml.j2 (first = controller, rest = one per CBS namespace)
@@ -70,10 +76,16 @@
         that:
           - jenkins_admin_password is defined
           - jenkins_admin_password | length >= 12
+          - jenkins_domain is defined
+          - jenkins_domain | length > 0
+          - "'://' not in jenkins_domain and '/' not in jenkins_domain"
           - "\"'\" not in jenkins_admin_password"
           - "'\\\\' not in jenkins_admin_password"
           - "'\\n' not in jenkins_admin_password"
-        fail_msg: "Set jenkins_admin_password in <target>/group_vars/all.yml: min 12 chars, no single quote ('), backslash or newline"
+        fail_msg: >-
+          Set in <target>/group_vars/all.yml:
+          jenkins_admin_password (min 12 chars, no single quote, backslash or newline) and
+          jenkins_domain as a bare hostname, e.g. "jenkins.bunlong.uk" (no https://, no slash)
       run_once: true
 
     - name: "[CONTROLLER] Only Debian/Ubuntu is supported for the controller"
@@ -456,6 +468,32 @@
     # ==========================================
     # Summary
     # ==========================================
+    - name: "[LOCAL] Check login URL through Cloudflare ({{ jenkins_public_url }})"
+      uri:
+        url: "{{ jenkins_public_url }}login"
+        follow_redirects: none
+        status_code: [200, 302, 303, 401, 403]
+        timeout: 15
+      register: jenkins_public_check
+      failed_when: false
+      delegate_to: localhost
+      become: false
+      when: is_controller
+
+    - name: "[LOCAL] Interpret the Cloudflare check"
+      set_fact:
+        jenkins_public_status: >-
+          {%- set st = jenkins_public_check.status | default(-1) | int -%}
+          {%- set loc = jenkins_public_check.location | default('') -%}
+          {%- if st == 200 -%}OK — Jenkins login page reachable (HTTP 200)
+          {%- elif st in [302, 303] and 'cloudflareaccess.com' in loc -%}OK — protected by Cloudflare Access (redirect to Access login)
+          {%- elif st in [302, 303] -%}Redirect to {{ loc }} — check the tunnel route
+          {%- elif st in [401, 403] -%}Blocked (HTTP {{ st }}) — Cloudflare Access policy denies this machine; fine if intended
+          {%- elif st in [502, 503, 530] -%}NOT WORKING (HTTP {{ st }}) — tunnel up but cannot reach http://localhost:{{ jenkins_port }} on {{ jenkins_controller }}
+          {%- else -%}NOT REACHABLE ({{ jenkins_public_check.msg | default('no response') }}) — add the Public hostname in Cloudflare (see below)
+          {%- endif -%}
+      when: is_controller
+
     - name: "[CONTROLLER] Collect Jenkins facts for the summary"
       shell: |
         set -o pipefail
@@ -477,11 +515,14 @@
           JENKINS ACCESS INFORMATION  (generated {{ ansible_date_time.iso8601 }})
           ===========================================================
 
-          URL (LAN)        : http://{{ jenkins_controller_ip }}:{{ jenkins_port }}/
-          URL (public)     : {{ jenkins_public_url }}
+          LOGIN URL        : {{ jenkins_public_url }}
+          Status           : {{ jenkins_public_status }}
           Username         : {{ jenkins_admin_username }}
           Password         : {{ jenkins_admin_password }}
           (change it only in group_vars/all.yml + re-run: JCasC resets it on every restart)
+
+          LAN / fallback   : {{ jenkins_lan_url }}   (only from your home network;
+                             also the address the build Pods use — do not block it on the LAN)
 
           Jenkins          : {{ jenkins_facts_raw.stdout_lines[0].split('=', 1)[1] }} ({{ jenkins_facts_raw.stdout_lines[3].split('=', 1)[1] }})
           Java             : {{ jenkins_facts_raw.stdout_lines[1].split('=', 1)[1] }}
@@ -514,10 +555,20 @@
             cbs-prod-env          Secret file        filled deploy/cbs.env.example (prod)
 
           -----------------------------------------------------------
-          Cloudflare Tunnel (optional public URL)
+          Cloudflare (Zero Trust dashboard)
           -----------------------------------------------------------
-            Public hostname : jenkins.<your-domain>  → Service http://localhost:{{ jenkins_port }}
-            Protect it with a Cloudflare Access policy. Set jenkins_domain in group_vars.
+          1. Networks → Tunnels → <tunnel running on {{ jenkins_controller }}> → Public Hostname → Add
+               Subdomain/Domain : {{ jenkins_domain }}
+               Service          : HTTP  localhost:{{ jenkins_port }}
+               (no HTTP Host Header override needed)
+          2. Access → Applications → Add → Self-hosted
+               Application domain : {{ jenkins_domain }}
+               Policy             : Allow → Emails → {{ admin_email | default('<your email>') }}
+             Login is then: Cloudflare Access (email PIN / IdP) → Jenkins user/password.
+          3. Test: open {{ jenkins_public_url }} in a browser.
+             Manage Jenkins must NOT show "your reverse proxy setup is broken".
+          Note: GitLab webhooks would need an Access bypass for /project/* — the
+          pipeline job polls GitLab every 2 min instead, so nothing to open.
 
           -----------------------------------------------------------
           Useful commands (on {{ jenkins_controller }})
