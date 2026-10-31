@@ -50,7 +50,9 @@ kyverno_version: "1.19.1"        # https://github.com/kyverno/kyverno/releases
 # "latest" = newest LTS from https://pkg.jenkins.io/debian-stable (then apt-held).
 # To pin:  apt-cache madison jenkins   →  e.g. jenkins_version: "2.580.2"
 jenkins_version: "latest"
-jenkins_apt_key_url: "https://pkg.jenkins.io/debian-stable/jenkins.io-2023.key"
+# Repo signing key rotated for LTS 2.541.1+ (Jan 2026). The old 2023 key -> NO_PUBKEY 7198F4B714ABFC68.
+jenkins_apt_key_url: "https://pkg.jenkins.io/debian-stable/jenkins.io-2026.key"
+jenkins_apt_key_fingerprint: "5E386EADB55F01504CAE8BCF7198F4B714ABFC68"   # expires 2028-12-21
 # https://github.com/jenkinsci/plugin-installation-manager-tool/releases
 jenkins_plugin_manager_version: "2.13.2"
 # Trivy itself runs inside the CBS build Pod (SpringBoot-Core-Banking/ci/jenkins-agent-pod.yaml),

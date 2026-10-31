@@ -26,6 +26,7 @@
   hosts: os_servers
   become: true
   gather_facts: true
+  any_errors_fatal: true          # a controller failure stops every host (no half-finished run)
   vars_files:
     - "{{ playbook_dir }}/../../common/versions.yml"
   vars:
@@ -110,6 +111,48 @@
     # ==========================================
     # Controller: Java + Jenkins LTS
     # ==========================================
+    # No update_cache here: on a re-run the old Jenkins repo entry (wrong key)
+    # would make "apt update" fail before we get to fix the key below.
+    - name: "[CONTROLLER] Ensure gnupg + ca-certificates (needed to check the repo key)"
+      apt:
+        name: [gnupg, ca-certificates]
+        state: present
+      when: is_controller
+
+    - name: "[CONTROLLER] Create /etc/apt/keyrings"
+      file:
+        path: /etc/apt/keyrings
+        state: directory
+        mode: "0755"
+      when: is_controller
+
+    - name: "[CONTROLLER] Add Jenkins apt key (LTS / debian-stable)"
+      get_url:
+        url: "{{ jenkins_apt_key_url }}"
+        dest: /etc/apt/keyrings/jenkins-keyring.asc
+        mode: "0644"
+        force: true
+      when: is_controller
+
+    - name: "[CONTROLLER] Verify Jenkins key fingerprint"
+      shell: |
+        set -o pipefail
+        gpg --show-keys --with-colons /etc/apt/keyrings/jenkins-keyring.asc | awk -F: '$1=="fpr"{print $10; exit}'
+      args:
+        executable: /bin/bash
+      register: jenkins_key_fpr
+      changed_when: false
+      failed_when: jenkins_key_fpr.stdout | trim != jenkins_apt_key_fingerprint
+      when: is_controller
+
+    - name: "[CONTROLLER] Add Jenkins LTS apt repository"
+      apt_repository:
+        repo: "deb [signed-by=/etc/apt/keyrings/jenkins-keyring.asc] https://pkg.jenkins.io/debian-stable binary/"
+        filename: jenkins
+        state: present
+        update_cache: true
+      when: is_controller
+
     - name: "[CONTROLLER] Check whether Java 21 is packaged for this OS"
       command: apt-cache show openjdk-21-jre-headless
       register: java21_pkg
@@ -128,29 +171,6 @@
         state: present
         update_cache: true
         cache_valid_time: 3600
-      when: is_controller
-
-    - name: "[CONTROLLER] Create /etc/apt/keyrings"
-      file:
-        path: /etc/apt/keyrings
-        state: directory
-        mode: "0755"
-      when: is_controller
-
-    - name: "[CONTROLLER] Add Jenkins apt key (LTS / debian-stable)"
-      get_url:
-        url: "{{ jenkins_apt_key_url }}"
-        dest: /etc/apt/keyrings/jenkins-keyring.asc
-        mode: "0644"
-        force: true
-      when: is_controller
-
-    - name: "[CONTROLLER] Add Jenkins LTS apt repository"
-      apt_repository:
-        repo: "deb [signed-by=/etc/apt/keyrings/jenkins-keyring.asc] https://pkg.jenkins.io/debian-stable binary/"
-        filename: jenkins
-        state: present
-        update_cache: true
       when: is_controller
 
     - name: "[CONTROLLER] Install Jenkins"
@@ -401,7 +421,7 @@
         mode: "0700"
       delegate_to: localhost
       become: false
-      run_once: true
+      when: is_controller
 
     - name: "[CONTROLLER] Fetch deploy kubeconfigs to your machine"
       fetch:
@@ -418,7 +438,7 @@
       loop: "{{ cbs_namespaces }}"
       delegate_to: localhost
       become: false
-      run_once: true
+      when: is_controller
 
     - name: "[CONTROLLER] Remove temporary manifest"
       file:
