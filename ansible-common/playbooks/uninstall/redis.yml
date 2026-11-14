@@ -1,16 +1,45 @@
 ---
 # ===========================================
-# Uninstall redis (CBS data, namespace cbs-data) — DELETES its data for UAT + PROD.
-# Asks for a typed confirmation. Passwords in access-info/cbs-data/secrets are kept.
+# Uninstall redis (K3s namespace "databases") — DELETES ALL ITS DATA,
+# for every project that uses it. Asks for a typed confirmation.
+# The namespace and the other database services stay.
 # ===========================================
-- name: Uninstall redis (CBS)
+- name: Uninstall redis
   hosts: os_servers
   become: true
   gather_facts: false
-  vars_files:
-    - "{{ playbook_dir }}/../../cbs-data/vars.yml"
   vars:
-    cbs_component: redis
+    kubeconfig_path: /etc/rancher/k3s/k3s.yaml
+    first_master: "{{ groups['os_servers'][0] }}"
+    db_namespace: "{{ databases_namespace | default('databases') }}"
+    db_name: redis
+
   tasks:
-    - name: Remove redis
-      include_tasks: "{{ cbs_files_dir }}/tasks/uninstall.yml"
+    - name: Confirm
+      pause:
+        prompt: "This DELETES {{ db_name }} and ALL its data (every project). Type: delete {{ db_name }}"
+      register: confirm
+      run_once: true
+
+    - name: Stop unless confirmed
+      fail:
+        msg: "Not confirmed — nothing deleted."
+      when: confirm.user_input | trim != 'delete ' ~ db_name
+      run_once: true
+
+    - name: "[MASTER] Delete {{ db_name }} StatefulSet, Service, Secret and volume"
+      shell: |
+        K="kubectl -n {{ db_namespace }}"
+        $K delete statefulset/{{ db_name }} service/{{ db_name }} --ignore-not-found --wait=true
+        $K delete secret {{ db_name }}-admin --ignore-not-found
+        $K delete pvc data-{{ db_name }}-0 --ignore-not-found
+      args:
+        executable: /bin/bash
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      when: inventory_hostname == first_master
+
+    - name: Summary
+      debug:
+        msg: "{{ db_name }} removed from namespace {{ db_namespace }} (access-info file kept)."
+      run_once: true

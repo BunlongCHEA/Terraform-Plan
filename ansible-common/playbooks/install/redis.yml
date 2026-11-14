@@ -1,65 +1,205 @@
 ---
 # ===========================================
-# Ansible Playbook: Redis for CBS (inside K3s, namespace cbs-data)
+# Ansible Playbook: Redis (inside K3s)
 #
-#   One Redis server, shared by UAT and PROD:
-#     UAT  → DB 1, ACL user cbs_uat
-#     PROD → DB 0, ACL user cbs_prod
-#   Users are defined in redis.conf (Secret redis-conf); re-running this
-#   playbook after a password change restarts Redis with the new users.
+#   One shared Redis server for all projects, admin password only:
+#     user default / redis_admin_password (group_vars/all.yml)
+#   Give each project its own DB number (0-15) or create ACL users yourself.
+#
+#   Namespace : databases   (databases_namespace)
+#   Address   : redis.databases.svc.cluster.local:6379
+#   Data      : local-path volume (AOF persistence) on the node labelled data-node=true
 #
 # Run:  ./terraform_main.sh raspberrypi redis
+# Info: ansible-common/access-info/<first-master>-redis-access-info.txt
 # ===========================================
-- name: Install Redis for CBS
+- name: Install Redis
   hosts: os_servers
   become: true
   gather_facts: true
   any_errors_fatal: true
   vars_files:
     - "{{ playbook_dir }}/../../common/versions.yml"
-    - "{{ playbook_dir }}/../../cbs-data/vars.yml"
+  vars:
+    kubeconfig_path: /etc/rancher/k3s/k3s.yaml
+    first_master: "{{ groups['os_servers'][0] }}"
+    is_master: "{{ inventory_hostname == first_master }}"
+    db_namespace: "{{ databases_namespace | default('databases') }}"
+    db_node: "{{ databases_node | default(groups['os_servers'][1] if (groups['os_servers'] | length) > 1 else groups['os_servers'][0]) }}"
+    db_node_label: data-node
+    db_size: "{{ redis_storage_size | default('2Gi') }}"
+    db_maxmemory: "{{ redis_maxmemory | default('512mb') }}"
+    db_host: "redis.{{ db_namespace }}.svc.cluster.local"
+    access_info_dir: "{{ (playbook_dir ~ '/../../access-info') | realpath }}"
 
   tasks:
-    - name: Passwords
-      include_tasks: "{{ cbs_files_dir }}/tasks/passwords.yml"
+    - name: Check redis_admin_password
+      assert:
+        that:
+          - redis_admin_password is defined
+          - redis_admin_password | length >= 12
+          - redis_admin_password is match('^[A-Za-z0-9._~-]+$')
+        fail_msg: "Set redis_admin_password in <target>/group_vars/all.yml: min 12 chars; letters, digits and . _ ~ - only (safe in URIs). Generate: openssl rand -hex 24"
+      run_once: true
 
-    - name: Namespace + node label
-      include_tasks: "{{ cbs_files_dir }}/tasks/prepare.yml"
-
-    - name: Deploy Redis
-      include_tasks: "{{ cbs_files_dir }}/tasks/apply.yml"
-      vars:
-        cbs_manifest: redis
-        cbs_wait_statefulset: redis
-
-    - name: "[MASTER] Check ACL users are loaded"
-      command: kubectl -n {{ cbs_data_namespace }} exec redis-0 -- redis-cli ACL USERS
+    - name: "[MASTER] Label {{ db_node }} with {{ db_node_label }}=true (matched by IP)"
+      shell: |
+        set -euo pipefail
+        NODE=$(kubectl get nodes -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.status.addresses[?(@.type=="InternalIP")].address}{"\n"}{end}' \
+               | awk -v ip="{{ hostvars[db_node]['ansible_default_ipv4']['address'] }}" '$2==ip {print $1}')
+        [ -n "$NODE" ] || { echo "No K3s node with the IP of {{ db_node }}"; exit 1; }
+        kubectl label node "$NODE" {{ db_node_label }}=true --overwrite
+      args:
+        executable: /bin/bash
       environment:
         KUBECONFIG: "{{ kubeconfig_path }}"
-      register: redis_users
-      changed_when: false
-      failed_when: "cbs_envs | map('regex_replace', '^', 'cbs_') | difference(redis_users.stdout_lines) | length > 0"
+      register: node_label
+      changed_when: "'labeled' in node_label.stdout"
       when: is_master
 
-    - name: "[LOCAL] Write access info"
+    - name: "[MASTER] Render manifest"
       copy:
-        dest: "{{ cbs_access_dir }}/redis-access-info.txt"
+        dest: /root/redis.yml
         mode: "0600"
         content: |
-          Redis ({{ cbs_redis_image }}) — namespace {{ cbs_data_namespace }}, node {{ cbs_data_host }}
-          In cluster : {{ cbs_hosts.redis }}:6379
-          Admin      : default / {{ pw.redis_admin }}
-          {% for e in cbs_envs %}
-          {{ (e | upper).ljust(11) }}: DB {{ 0 if e == 'prod' else 1 }}  user cbs_{{ e }} / {{ pw['redis_' ~ e] }}
-          {% endfor %}
-          Inspect: on {{ first_master }} run
-            sudo kubectl -n {{ cbs_data_namespace }} exec -it redis-0 -- redis-cli      (already authenticated as admin)
-          {% for e in cbs_envs %}
-
-          Line for cbs-{{ e }}.env:
-            REDIS_URI=redis://cbs_{{ e }}:{{ pw['redis_' ~ e] }}@{{ cbs_hosts.redis }}:6379/{{ 0 if e == 'prod' else 1 }}
-          {% endfor %}
+          apiVersion: v1
+          kind: Namespace
+          metadata:
+            name: {{ db_namespace }}
+          ---
+          apiVersion: v1
+          kind: Secret
+          metadata:
+            name: redis-admin
+            namespace: {{ db_namespace }}
+          type: Opaque
+          stringData:
+            REDIS_PASSWORD: "{{ redis_admin_password }}"
+          ---
+          apiVersion: v1
+          kind: Service
+          metadata:
+            name: redis
+            namespace: {{ db_namespace }}
+            labels: {app.kubernetes.io/name: redis}
+          spec:
+            selector: {app.kubernetes.io/name: redis}
+            ports:
+              - {name: redis, port: 6379, targetPort: 6379}
+          ---
+          apiVersion: apps/v1
+          kind: StatefulSet
+          metadata:
+            name: redis
+            namespace: {{ db_namespace }}
+            labels: {app.kubernetes.io/name: redis}
+          spec:
+            serviceName: redis
+            replicas: 1
+            selector:
+              matchLabels: {app.kubernetes.io/name: redis}
+            template:
+              metadata:
+                labels: {app.kubernetes.io/name: redis}
+                annotations:
+                  # restart Redis when the password changes (it is read at start)
+                  password-checksum: "{{ redis_admin_password | hash('sha1') }}"
+              spec:
+                nodeSelector:
+                  {{ db_node_label }}: "true"
+                containers:
+                  - name: redis
+                    image: {{ redis_image }}
+                    args:
+                      - "--appendonly"
+                      - "yes"
+                      - "--requirepass"
+                      - "$(REDIS_PASSWORD)"
+                      - "--maxmemory"
+                      - "{{ db_maxmemory }}"
+                      - "--maxmemory-policy"
+                      - "noeviction"
+                    ports: [{containerPort: 6379, name: redis}]
+                    env:
+                      - name: REDIS_PASSWORD
+                        valueFrom: {secretKeyRef: {name: redis-admin, key: REDIS_PASSWORD}}
+                      - name: REDISCLI_AUTH
+                        valueFrom: {secretKeyRef: {name: redis-admin, key: REDIS_PASSWORD}}
+                    readinessProbe:
+                      exec: {command: ["redis-cli", "ping"]}
+                      periodSeconds: 10
+                    livenessProbe:
+                      exec: {command: ["redis-cli", "ping"]}
+                      periodSeconds: 20
+                    resources:
+                      requests: {cpu: 100m, memory: 128Mi}
+                      limits: {memory: 768Mi}
+                    volumeMounts:
+                      - {name: data, mountPath: /data}
+            volumeClaimTemplates:
+              - metadata: {name: data}
+                spec:
+                  accessModes: ["ReadWriteOnce"]
+                  storageClassName: local-path
+                  resources: {requests: {storage: {{ db_size }}}}
       no_log: true
+      when: is_master
+
+    - name: "[MASTER] Apply manifest"
+      command: kubectl apply -f /root/redis.yml
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: db_apply
+      changed_when: "'created' in db_apply.stdout or 'configured' in db_apply.stdout"
+      when: is_master
+
+    - name: "[MASTER] Remove rendered manifest (contains the password)"
+      file:
+        path: /root/redis.yml
+        state: absent
+      when: is_master
+
+    - name: "[MASTER] Wait for Redis (first start pulls the image: up to 10 min)"
+      command: kubectl -n {{ db_namespace }} rollout status statefulset/redis --timeout=600s
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: false
+      when: is_master
+
+    - name: "[MASTER] Server version"
+      shell: kubectl -n {{ db_namespace }} exec redis-0 -- redis-cli INFO server | grep '^redis_version' | tr -d '\r'
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: db_version
+      changed_when: false
+      when: is_master
+
+    - name: "[LOCAL] Save access info (ansible-common/access-info/)"
+      copy:
+        dest: "{{ access_info_dir }}/{{ first_master }}-redis-access-info.txt"
+        mode: "0600"
+        content: |
+          ===========================================================
+          REDIS ACCESS INFORMATION  (generated {{ ansible_date_time.iso8601 }})
+          ===========================================================
+          Version     : {{ db_version.stdout | default('') }}
+          Namespace   : {{ db_namespace }}   (node {{ db_node }}, label {{ db_node_label }}=true)
+          In cluster  : {{ db_host }}:6379   (databases 0-15)
+          Admin       : default / {{ redis_admin_password }}
+          Admin URI   : redis://default:{{ redis_admin_password }}@{{ db_host }}:6379/0
+
+          redis-cli on the server (already authenticated):
+            sudo kubectl -n {{ db_namespace }} exec -it redis-0 -- redis-cli
+
+          Connect from your laptop (keep the terminal open):
+            on {{ first_master }}:  sudo kubectl -n {{ db_namespace }} port-forward --address 0.0.0.0 svc/redis 6379:6379
+            then RedisInsight →  <{{ first_master }}-ip>:6379  user default
+
+          Separate projects:
+            - simplest: a DB number per project, e.g. redis://default:<password>@{{ db_host }}:6379/1
+            - stricter: an ACL user per project (not kept across restarts unless you add an aclfile):
+                ACL SETUSER myapp on >'<password>' ~myapp:* +@all -@dangerous
+          ===========================================================
       delegate_to: localhost
       become: false
       run_once: true
@@ -67,6 +207,6 @@
     - name: Summary
       debug:
         msg:
-          - "Redis is running: {{ cbs_hosts.redis }}:6379  ACL users: {{ redis_users.stdout_lines | default([]) | join(', ') }}"
-          - "Logins: {{ cbs_access_dir }}/redis-access-info.txt"
+          - "Redis is running: {{ db_host }}:6379  ({{ db_version.stdout | default('') }})"
+          - "Access info: {{ access_info_dir }}/{{ first_master }}-redis-access-info.txt"
       run_once: true

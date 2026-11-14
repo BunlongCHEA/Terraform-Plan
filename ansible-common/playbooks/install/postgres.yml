@@ -1,97 +1,198 @@
 ---
 # ===========================================
-# Ansible Playbook: PostgreSQL for CBS (inside K3s, namespace cbs-data)
+# Ansible Playbook: PostgreSQL (inside K3s)
 #
-#   One PostgreSQL server, shared by UAT and PROD:
-#     core_banking_uat   owner cbs_uat
-#     core_banking_prod  owner cbs_prod
-#   Each user can only connect to its own database.
+#   One shared PostgreSQL server for all projects, admin user only:
+#     user postgres / postgres_admin_password (group_vars/all.yml)
+#   Create project databases/users yourself (examples in the access-info file).
+#
+#   Namespace : databases   (databases_namespace)
+#   Address   : postgres.databases.svc.cluster.local:5432
+#   Data      : local-path volume on the node labelled data-node=true
+#               (2nd host by default — databases_node)
 #
 # Run:  ./terraform_main.sh raspberrypi postgres
-# Needs: K3s + jenkins.yml (creates the cbs-uat / cbs-prod namespaces)
+# Info: ansible-common/access-info/<first-master>-postgres-access-info.txt
 # ===========================================
-- name: Install PostgreSQL for CBS
+- name: Install PostgreSQL
   hosts: os_servers
   become: true
   gather_facts: true
   any_errors_fatal: true
   vars_files:
     - "{{ playbook_dir }}/../../common/versions.yml"
-    - "{{ playbook_dir }}/../../cbs-data/vars.yml"
+  vars:
+    kubeconfig_path: /etc/rancher/k3s/k3s.yaml
+    first_master: "{{ groups['os_servers'][0] }}"
+    is_master: "{{ inventory_hostname == first_master }}"
+    db_namespace: "{{ databases_namespace | default('databases') }}"
+    db_node: "{{ databases_node | default(groups['os_servers'][1] if (groups['os_servers'] | length) > 1 else groups['os_servers'][0]) }}"
+    db_node_label: data-node
+    db_size: "{{ postgres_storage_size | default('20Gi') }}"
+    db_host: "postgres.{{ db_namespace }}.svc.cluster.local"
+    access_info_dir: "{{ (playbook_dir ~ '/../../access-info') | realpath }}"
 
   tasks:
-    - name: Passwords
-      include_tasks: "{{ cbs_files_dir }}/tasks/passwords.yml"
+    - name: Check postgres_admin_password
+      assert:
+        that:
+          - postgres_admin_password is defined
+          - postgres_admin_password | length >= 12
+          - postgres_admin_password is match('^[A-Za-z0-9._~-]+$')
+        fail_msg: "Set postgres_admin_password in <target>/group_vars/all.yml: min 12 chars; letters, digits and . _ ~ - only (safe in URIs). Generate: openssl rand -hex 24"
+      run_once: true
 
-    - name: Namespace + node label
-      include_tasks: "{{ cbs_files_dir }}/tasks/prepare.yml"
-
-    - name: Deploy PostgreSQL
-      include_tasks: "{{ cbs_files_dir }}/tasks/apply.yml"
-      vars:
-        cbs_manifest: postgres
-        cbs_wait_statefulset: postgres
-
-    - name: "[MASTER] Create / update role + database per env"
+    - name: "[MASTER] Label {{ db_node }} with {{ db_node_label }}=true (matched by IP)"
       shell: |
         set -euo pipefail
-        kubectl -n {{ cbs_data_namespace }} exec -i postgres-0 -- psql -U postgres -v ON_ERROR_STOP=1 <<'SQL'
-        {% for e in cbs_envs %}
-        DO $$BEGIN
-          IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'cbs_{{ e }}') THEN
-            CREATE ROLE cbs_{{ e }} LOGIN PASSWORD '{{ pw['pg_' ~ e] }}';
-          ELSE
-            ALTER ROLE cbs_{{ e }} LOGIN PASSWORD '{{ pw['pg_' ~ e] }}';
-          END IF;
-        END$$;
-        SELECT 'CREATE DATABASE core_banking_{{ e }} OWNER cbs_{{ e }}'
-          WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = 'core_banking_{{ e }}')\gexec
-        REVOKE ALL ON DATABASE core_banking_{{ e }} FROM PUBLIC;
-        GRANT ALL ON DATABASE core_banking_{{ e }} TO cbs_{{ e }};
-        {% endfor %}
-        SQL
+        NODE=$(kubectl get nodes -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.status.addresses[?(@.type=="InternalIP")].address}{"\n"}{end}' \
+               | awk -v ip="{{ hostvars[db_node]['ansible_default_ipv4']['address'] }}" '$2==ip {print $1}')
+        [ -n "$NODE" ] || { echo "No K3s node with the IP of {{ db_node }}"; exit 1; }
+        kubectl label node "$NODE" {{ db_node_label }}=true --overwrite
       args:
         executable: /bin/bash
       environment:
         KUBECONFIG: "{{ kubeconfig_path }}"
-      no_log: true
-      changed_when: false
+      register: node_label
+      changed_when: "'labeled' in node_label.stdout"
       when: is_master
 
-    - name: "[MASTER] List databases"
-      command: >
-        kubectl -n {{ cbs_data_namespace }} exec postgres-0 --
-        psql -U postgres -tAc "SELECT datname || ' (owner ' || pg_get_userbyid(datdba) || ')' FROM pg_database WHERE datname LIKE 'core_banking_%'"
-      environment:
-        KUBECONFIG: "{{ kubeconfig_path }}"
-      register: pg_dbs
-      changed_when: false
-      when: is_master
-
-    - name: "[LOCAL] Write access info"
+    - name: "[MASTER] Render manifest"
       copy:
-        dest: "{{ cbs_access_dir }}/postgres-access-info.txt"
+        dest: /root/postgres.yml
         mode: "0600"
         content: |
-          PostgreSQL ({{ cbs_postgres_image }}) — namespace {{ cbs_data_namespace }}, node {{ cbs_data_host }}
-          In cluster : {{ cbs_hosts.postgres }}:5432
-          Admin      : postgres / {{ pw.postgres_admin }}
-          {% for e in cbs_envs %}
-          {{ (e | upper).ljust(11) }}: db core_banking_{{ e }}  user cbs_{{ e }} / {{ pw['pg_' ~ e] }}
-          {% endfor %}
-          From laptop: on {{ first_master }} run
-            sudo kubectl -n {{ cbs_data_namespace }} port-forward --address 0.0.0.0 svc/postgres 5432:5432
-            then connect DBeaver/psql to <{{ first_master }}-ip>:5432
-          {% for e in cbs_envs %}
-
-          Lines for cbs-{{ e }}.env:
-            DB_HOST={{ cbs_hosts.postgres }}
-            DB_PORT=5432
-            DB_NAME=core_banking_{{ e }}
-            DB_USERNAME=cbs_{{ e }}
-            DB_PASSWORD={{ pw['pg_' ~ e] }}
-          {% endfor %}
+          apiVersion: v1
+          kind: Namespace
+          metadata:
+            name: {{ db_namespace }}
+          ---
+          apiVersion: v1
+          kind: Secret
+          metadata:
+            name: postgres-admin
+            namespace: {{ db_namespace }}
+          type: Opaque
+          stringData:
+            POSTGRES_PASSWORD: "{{ postgres_admin_password }}"
+          ---
+          apiVersion: v1
+          kind: Service
+          metadata:
+            name: postgres
+            namespace: {{ db_namespace }}
+            labels: {app.kubernetes.io/name: postgres}
+          spec:
+            selector: {app.kubernetes.io/name: postgres}
+            ports:
+              - {name: postgres, port: 5432, targetPort: 5432}
+          ---
+          apiVersion: apps/v1
+          kind: StatefulSet
+          metadata:
+            name: postgres
+            namespace: {{ db_namespace }}
+            labels: {app.kubernetes.io/name: postgres}
+          spec:
+            serviceName: postgres
+            replicas: 1
+            selector:
+              matchLabels: {app.kubernetes.io/name: postgres}
+            template:
+              metadata:
+                labels: {app.kubernetes.io/name: postgres}
+              spec:
+                nodeSelector:
+                  {{ db_node_label }}: "true"
+                terminationGracePeriodSeconds: 60
+                containers:
+                  - name: postgres
+                    image: {{ postgres_image }}
+                    args: ["-c", "max_connections=200", "-c", "shared_buffers=256MB"]
+                    ports: [{containerPort: 5432, name: postgres}]
+                    env:
+                      - name: POSTGRES_PASSWORD
+                        valueFrom: {secretKeyRef: {name: postgres-admin, key: POSTGRES_PASSWORD}}
+                      - {name: PGDATA, value: /var/lib/postgresql/data/pgdata}
+                      - {name: POSTGRES_INITDB_ARGS, value: "--auth-host=scram-sha-256"}
+                    readinessProbe:
+                      exec: {command: ["pg_isready", "-U", "postgres"]}
+                      periodSeconds: 10
+                    livenessProbe:
+                      exec: {command: ["pg_isready", "-U", "postgres"]}
+                      periodSeconds: 20
+                      failureThreshold: 6
+                    resources:
+                      requests: {cpu: 250m, memory: 512Mi}
+                      limits: {memory: 2Gi}
+                    volumeMounts:
+                      - {name: data, mountPath: /var/lib/postgresql/data}
+            volumeClaimTemplates:
+              - metadata: {name: data}
+                spec:
+                  accessModes: ["ReadWriteOnce"]
+                  storageClassName: local-path
+                  resources: {requests: {storage: {{ db_size }}}}
       no_log: true
+      when: is_master
+
+    - name: "[MASTER] Apply manifest"
+      command: kubectl apply -f /root/postgres.yml
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: db_apply
+      changed_when: "'created' in db_apply.stdout or 'configured' in db_apply.stdout"
+      when: is_master
+
+    - name: "[MASTER] Remove rendered manifest (contains the password)"
+      file:
+        path: /root/postgres.yml
+        state: absent
+      when: is_master
+
+    - name: "[MASTER] Wait for PostgreSQL (first start pulls the image: up to 10 min)"
+      command: kubectl -n {{ db_namespace }} rollout status statefulset/postgres --timeout=600s
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: false
+      when: is_master
+
+    - name: "[MASTER] Server version"
+      command: kubectl -n {{ db_namespace }} exec postgres-0 -- psql -U postgres -tAc "SELECT version()"
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: db_version
+      changed_when: false
+      when: is_master
+
+    - name: "[LOCAL] Save access info (ansible-common/access-info/)"
+      copy:
+        dest: "{{ access_info_dir }}/{{ first_master }}-postgres-access-info.txt"
+        mode: "0600"
+        content: |
+          ===========================================================
+          POSTGRESQL ACCESS INFORMATION  (generated {{ ansible_date_time.iso8601 }})
+          ===========================================================
+          Version     : {{ db_version.stdout | default('') }}
+          Namespace   : {{ db_namespace }}   (node {{ db_node }}, label {{ db_node_label }}=true)
+          In cluster  : {{ db_host }}:5432
+          Admin       : postgres / {{ postgres_admin_password }}
+
+          Connect from your laptop (keep the terminal open):
+            on {{ first_master }}:  sudo kubectl -n {{ db_namespace }} port-forward --address 0.0.0.0 svc/postgres 5432:5432
+            then DBeaver / psql →  host <{{ first_master }}-ip>  port 5432  user postgres
+
+          psql shell on the server:
+            sudo kubectl -n {{ db_namespace }} exec -it postgres-0 -- psql -U postgres
+
+          Create a database + user for a project (example):
+            CREATE ROLE myapp LOGIN PASSWORD '<password>';
+            CREATE DATABASE myapp OWNER myapp;
+            REVOKE ALL ON DATABASE myapp FROM PUBLIC;
+
+          App connection string:
+            jdbc:postgresql://{{ db_host }}:5432/<database>
+          ===========================================================
       delegate_to: localhost
       become: false
       run_once: true
@@ -99,7 +200,6 @@
     - name: Summary
       debug:
         msg:
-          - "PostgreSQL is running: {{ cbs_hosts.postgres }}:5432"
-          - "Databases: {{ pg_dbs.stdout_lines | default([]) | join(', ') }}"
-          - "Logins   : {{ cbs_access_dir }}/postgres-access-info.txt"
+          - "PostgreSQL is running: {{ db_host }}:5432  (admin: postgres)"
+          - "Access info: {{ access_info_dir }}/{{ first_master }}-postgres-access-info.txt"
       run_once: true

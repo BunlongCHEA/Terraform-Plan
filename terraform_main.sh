@@ -213,14 +213,14 @@ uninstall_monitoring_menu() {
   esac
 }
 
-# ---- CBS database sub-menus (option 7 install / option 7 uninstall) ----
-# All in K3s namespace cbs-data, shared by UAT + PROD (own DB/user per env).
-install_cbs_data_menu() {
-  echo "Select CBS database component:"
-  echo "  1) PostgreSQL   (postgres.yml - core_banking_uat / core_banking_prod)"
-  echo "  2) MongoDB      (mongodb.yml  - cbs_logs_uat / cbs_logs_prod)"
-  echo "  3) Redis        (redis.yml    - UAT DB 1 / PROD DB 0)"
-  echo "  4) RabbitMQ     (rabbitmq.yml - vhost cbs_uat / cbs_prod)"
+# ---- Database sub-menus (option 7 install / option 7 uninstall) ----
+# Shared PostgreSQL / MongoDB / Redis / RabbitMQ in K3s namespace "databases" (admin user only).
+install_databases_menu() {
+  echo "Select database:"
+  echo "  1) PostgreSQL   (postgres.yml)"
+  echo "  2) MongoDB      (mongodb.yml)"
+  echo "  3) Redis        (redis.yml)"
+  echo "  4) RabbitMQ     (rabbitmq.yml, with management UI)"
   echo "  5) All four"
   echo "  6) Back"
   read -r -p "Enter choice [1-6]: " c
@@ -238,8 +238,8 @@ install_cbs_data_menu() {
   esac
 }
 
-uninstall_cbs_data_menu() {
-  echo "Select CBS database to uninstall (DELETES its data, asks to confirm):"
+uninstall_databases_menu() {
+  echo "Select database to uninstall (DELETES its data, asks to confirm):"
   echo "  1) PostgreSQL"
   echo "  2) MongoDB"
   echo "  3) Redis"
@@ -264,8 +264,8 @@ install_menu() {
   echo "  4) Monitoring (Prometheus / Grafana stack) ->"
   echo "  5) Logging (Elasticsearch + Kibana + Alloy/Fluent Bit shipper)"
   echo "  6) Jenkins (controller on first host, build agents as Pods on the others)"
-  echo "  7) CBS databases (PostgreSQL / MongoDB / Redis / RabbitMQ) ->"
-  echo "  8) All of the above (1-5, without Jenkins / CBS databases)"
+  echo "  7) Databases (PostgreSQL / MongoDB / Redis / RabbitMQ) ->"
+  echo "  8) All of the above (1-5, without Jenkins / databases)"
   echo "  9) Skip"
   read -p "Enter choice: " c
   case "$c" in
@@ -275,7 +275,7 @@ install_menu() {
     4) install_monitoring_menu ;;
     5) run_playbook "Install Logging"       "$P_INSTALL/logging.yml" ;;
     6) run_playbook "Install Jenkins"       "$P_INSTALL/jenkins.yml" ;;
-    7) install_cbs_data_menu ;;
+    7) install_databases_menu ;;
     8) run_playbook "Install Ansible"       "$P_INSTALL/ansible.yml"
        run_rancher
        run_playbook "Install ArgoCD"        "$P_INSTALL/argocd.yml"
@@ -297,7 +297,7 @@ uninstall_menu() {
   echo "  4) Rancher & K3s (WARNING: removes entire cluster)"
   echo "  5) Everything (Logging + Grafana stack + Prometheus + ArgoCD + Rancher)"
   echo "  6) Jenkins (controller + agent namespace; keeps cbs-uat/cbs-prod)"
-  echo "  7) CBS databases ->"
+  echo "  7) Databases ->"
   echo "  8) Back"
   read -p "Enter choice: " c
   case "$c" in
@@ -319,7 +319,7 @@ uninstall_menu() {
          run_playbook "Uninstall Rancher"       "$P_UNINSTALL/rancher.yml"
        fi ;;
     6) run_playbook "Uninstall Jenkins"    "$P_UNINSTALL/jenkins.yml" ;;
-    7) uninstall_cbs_data_menu ;;
+    7) uninstall_databases_menu ;;
     8) return 0 ;;
     *) print_error "Invalid choice" ;;
   esac
@@ -365,10 +365,10 @@ Usage: $0 <target> <command>
     grafana        Install Grafana + Loki + Tempo + Alloy (via ArgoCD)
     logging        Install Elasticsearch + Kibana + log shipper (ECK, via ArgoCD)
     jenkins        Install Jenkins controller (first host) + K8s build agents (other hosts)
-    postgres       Install PostgreSQL for CBS  (K3s ns cbs-data, DB+user per env)
-    mongodb        Install MongoDB for CBS
-    redis          Install Redis for CBS
-    rabbitmq       Install RabbitMQ for CBS
+    postgres       Install PostgreSQL  (K3s namespace databases, admin user only)
+    mongodb        Install MongoDB     (K3s namespace databases, admin user only)
+    redis          Install Redis       (K3s namespace databases, admin password only)
+    rabbitmq       Install RabbitMQ    (K3s namespace databases, admin user + UI)
     install        Show install menu
     uninstall      Show uninstall menu
     help           Show this help

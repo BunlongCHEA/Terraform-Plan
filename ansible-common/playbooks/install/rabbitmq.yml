@@ -1,81 +1,200 @@
 ---
 # ===========================================
-# Ansible Playbook: RabbitMQ for CBS (inside K3s, namespace cbs-data)
+# Ansible Playbook: RabbitMQ (inside K3s)
 #
-#   One broker, shared by UAT and PROD:
-#     vhost cbs_uat   user cbs_uat   (full rights on that vhost only)
-#     vhost cbs_prod  user cbs_prod
-#   CBS declares its own exchange/queues at startup.
+#   One shared broker for all projects, admin user only:
+#     user admin / rabbitmq_admin_password (group_vars/all.yml), vhost "/"
+#   Create project vhosts/users yourself (examples in the access-info file).
+#
+#   Namespace : databases   (databases_namespace)
+#   Address   : rabbitmq.databases.svc.cluster.local:5672   (management UI :15672)
+#   Data      : local-path volume on the node labelled data-node=true
 #
 # Run:  ./terraform_main.sh raspberrypi rabbitmq
+# Info: ansible-common/access-info/<first-master>-rabbitmq-access-info.txt
 # ===========================================
-- name: Install RabbitMQ for CBS
+- name: Install RabbitMQ
   hosts: os_servers
   become: true
   gather_facts: true
   any_errors_fatal: true
   vars_files:
     - "{{ playbook_dir }}/../../common/versions.yml"
-    - "{{ playbook_dir }}/../../cbs-data/vars.yml"
+  vars:
+    kubeconfig_path: /etc/rancher/k3s/k3s.yaml
+    first_master: "{{ groups['os_servers'][0] }}"
+    is_master: "{{ inventory_hostname == first_master }}"
+    db_namespace: "{{ databases_namespace | default('databases') }}"
+    db_node: "{{ databases_node | default(groups['os_servers'][1] if (groups['os_servers'] | length) > 1 else groups['os_servers'][0]) }}"
+    db_node_label: data-node
+    db_size: "{{ rabbitmq_storage_size | default('5Gi') }}"
+    db_host: "rabbitmq.{{ db_namespace }}.svc.cluster.local"
+    access_info_dir: "{{ (playbook_dir ~ '/../../access-info') | realpath }}"
 
   tasks:
-    - name: Passwords
-      include_tasks: "{{ cbs_files_dir }}/tasks/passwords.yml"
+    - name: Check rabbitmq_admin_password
+      assert:
+        that:
+          - rabbitmq_admin_password is defined
+          - rabbitmq_admin_password | length >= 12
+          - rabbitmq_admin_password is match('^[A-Za-z0-9._~-]+$')
+        fail_msg: "Set rabbitmq_admin_password in <target>/group_vars/all.yml: min 12 chars; letters, digits and . _ ~ - only (safe in URIs). Generate: openssl rand -hex 24"
+      run_once: true
 
-    - name: Namespace + node label
-      include_tasks: "{{ cbs_files_dir }}/tasks/prepare.yml"
-
-    - name: Deploy RabbitMQ
-      include_tasks: "{{ cbs_files_dir }}/tasks/apply.yml"
-      vars:
-        cbs_manifest: rabbitmq
-        cbs_wait_statefulset: rabbitmq
-
-    - name: "[MASTER] Create / update vhost + user per env"
+    - name: "[MASTER] Label {{ db_node }} with {{ db_node_label }}=true (matched by IP)"
       shell: |
         set -euo pipefail
-        R="kubectl -n {{ cbs_data_namespace }} exec rabbitmq-0 -- rabbitmqctl -q"
-        {% for e in cbs_envs %}
-        $R list_vhosts --no-table-headers | grep -qx 'cbs_{{ e }}' || $R add_vhost 'cbs_{{ e }}'
-        if $R list_users --no-table-headers | awk '{print $1}' | grep -qx 'cbs_{{ e }}'; then
-          $R change_password 'cbs_{{ e }}' '{{ pw['rabbitmq_' ~ e] }}'
-        else
-          $R add_user 'cbs_{{ e }}' '{{ pw['rabbitmq_' ~ e] }}'
-        fi
-        $R set_permissions -p 'cbs_{{ e }}' 'cbs_{{ e }}' '.*' '.*' '.*'
-        {% endfor %}
+        NODE=$(kubectl get nodes -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.status.addresses[?(@.type=="InternalIP")].address}{"\n"}{end}' \
+               | awk -v ip="{{ hostvars[db_node]['ansible_default_ipv4']['address'] }}" '$2==ip {print $1}')
+        [ -n "$NODE" ] || { echo "No K3s node with the IP of {{ db_node }}"; exit 1; }
+        kubectl label node "$NODE" {{ db_node_label }}=true --overwrite
       args:
         executable: /bin/bash
       environment:
         KUBECONFIG: "{{ kubeconfig_path }}"
+      register: node_label
+      changed_when: "'labeled' in node_label.stdout"
+      when: is_master
+
+    - name: "[MASTER] Render manifest"
+      copy:
+        dest: /root/rabbitmq.yml
+        mode: "0600"
+        content: |
+          apiVersion: v1
+          kind: Namespace
+          metadata:
+            name: {{ db_namespace }}
+          ---
+          apiVersion: v1
+          kind: Secret
+          metadata:
+            name: rabbitmq-admin
+            namespace: {{ db_namespace }}
+          type: Opaque
+          stringData:
+            RABBITMQ_DEFAULT_USER: "admin"
+            RABBITMQ_DEFAULT_PASS: "{{ rabbitmq_admin_password }}"
+          ---
+          apiVersion: v1
+          kind: Service
+          metadata:
+            name: rabbitmq
+            namespace: {{ db_namespace }}
+            labels: {app.kubernetes.io/name: rabbitmq}
+          spec:
+            selector: {app.kubernetes.io/name: rabbitmq}
+            ports:
+              - {name: amqp, port: 5672, targetPort: 5672}
+              - {name: management, port: 15672, targetPort: 15672}
+          ---
+          apiVersion: apps/v1
+          kind: StatefulSet
+          metadata:
+            name: rabbitmq
+            namespace: {{ db_namespace }}
+            labels: {app.kubernetes.io/name: rabbitmq}
+          spec:
+            serviceName: rabbitmq
+            replicas: 1
+            selector:
+              matchLabels: {app.kubernetes.io/name: rabbitmq}
+            template:
+              metadata:
+                labels: {app.kubernetes.io/name: rabbitmq}
+              spec:
+                nodeSelector:
+                  {{ db_node_label }}: "true"
+                terminationGracePeriodSeconds: 60
+                containers:
+                  - name: rabbitmq
+                    image: {{ rabbitmq_image }}
+                    ports:
+                      - {containerPort: 5672, name: amqp}
+                      - {containerPort: 15672, name: management}
+                    envFrom:
+                      - secretRef: {name: rabbitmq-admin}
+                    readinessProbe:
+                      exec: {command: ["rabbitmq-diagnostics", "-q", "ping"]}
+                      periodSeconds: 15
+                      timeoutSeconds: 10
+                    livenessProbe:
+                      exec: {command: ["rabbitmq-diagnostics", "-q", "status"]}
+                      initialDelaySeconds: 60
+                      periodSeconds: 30
+                      timeoutSeconds: 15
+                      failureThreshold: 6
+                    resources:
+                      requests: {cpu: 200m, memory: 512Mi}
+                      limits: {memory: 1Gi}
+                    volumeMounts:
+                      - {name: data, mountPath: /var/lib/rabbitmq}
+            volumeClaimTemplates:
+              - metadata: {name: data}
+                spec:
+                  accessModes: ["ReadWriteOnce"]
+                  storageClassName: local-path
+                  resources: {requests: {storage: {{ db_size }}}}
       no_log: true
+      when: is_master
+
+    - name: "[MASTER] Apply manifest"
+      command: kubectl apply -f /root/rabbitmq.yml
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: db_apply
+      changed_when: "'created' in db_apply.stdout or 'configured' in db_apply.stdout"
+      when: is_master
+
+    - name: "[MASTER] Remove rendered manifest (contains the password)"
+      file:
+        path: /root/rabbitmq.yml
+        state: absent
+      when: is_master
+
+    - name: "[MASTER] Wait for RabbitMQ (first start pulls the image: up to 10 min)"
+      command: kubectl -n {{ db_namespace }} rollout status statefulset/rabbitmq --timeout=600s
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
       changed_when: false
       when: is_master
 
-    - name: "[LOCAL] Write access info"
+    - name: "[MASTER] Server version"
+      command: kubectl -n {{ db_namespace }} exec rabbitmq-0 -- rabbitmqctl -q version
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: db_version
+      changed_when: false
+      when: is_master
+
+    - name: "[LOCAL] Save access info (ansible-common/access-info/)"
       copy:
-        dest: "{{ cbs_access_dir }}/rabbitmq-access-info.txt"
+        dest: "{{ access_info_dir }}/{{ first_master }}-rabbitmq-access-info.txt"
         mode: "0600"
         content: |
-          RabbitMQ ({{ cbs_rabbitmq_image }}) — namespace {{ cbs_data_namespace }}, node {{ cbs_data_host }}
-          In cluster : {{ cbs_hosts.rabbitmq }}:5672   (management UI :15672)
-          Admin      : admin / {{ pw.rabbitmq_admin }}
-          {% for e in cbs_envs %}
-          {{ (e | upper).ljust(11) }}: vhost cbs_{{ e }}  user cbs_{{ e }} / {{ pw['rabbitmq_' ~ e] }}
-          {% endfor %}
-          UI from laptop: on {{ first_master }} run
-            sudo kubectl -n {{ cbs_data_namespace }} port-forward --address 0.0.0.0 svc/rabbitmq 15672:15672
-            then open http://<{{ first_master }}-ip>:15672  (admin login)
-          {% for e in cbs_envs %}
+          ===========================================================
+          RABBITMQ ACCESS INFORMATION  (generated {{ ansible_date_time.iso8601 }})
+          ===========================================================
+          Version     : {{ db_version.stdout | default('') }}
+          Namespace   : {{ db_namespace }}   (node {{ db_node }}, label {{ db_node_label }}=true)
+          In cluster  : {{ db_host }}:5672   (management UI {{ db_host }}:15672)
+          Admin       : admin / {{ rabbitmq_admin_password }}   (vhost /)
+          Admin URI   : amqp://admin:{{ rabbitmq_admin_password }}@{{ db_host }}:5672/
 
-          Lines for cbs-{{ e }}.env:
-            RABBITMQ_HOST={{ cbs_hosts.rabbitmq }}
-            RABBITMQ_PORT=5672
-            RABBITMQ_USER=cbs_{{ e }}
-            RABBITMQ_PASS={{ pw['rabbitmq_' ~ e] }}
-            RABBITMQ_VHOST=cbs_{{ e }}
-          {% endfor %}
-      no_log: true
+          Management UI from your laptop (keep the terminal open):
+            on {{ first_master }}:  sudo kubectl -n {{ db_namespace }} port-forward --address 0.0.0.0 svc/rabbitmq 15672:15672
+            then open http://<{{ first_master }}-ip>:15672  and log in as admin
+
+          Create a vhost + user for a project (example, on {{ first_master }}):
+            R="sudo kubectl -n {{ db_namespace }} exec rabbitmq-0 -- rabbitmqctl"
+            $R add_vhost myapp
+            $R add_user myapp '<password>'
+            $R set_permissions -p myapp myapp '.*' '.*' '.*'
+          (or in the UI: Admin → Virtual Hosts / Users)
+
+          App connection:
+            host {{ db_host }}  port 5672  vhost myapp  user myapp
+          ===========================================================
       delegate_to: localhost
       become: false
       run_once: true
@@ -83,6 +202,6 @@
     - name: Summary
       debug:
         msg:
-          - "RabbitMQ is running: {{ cbs_hosts.rabbitmq }}:5672 (vhosts cbs_uat, cbs_prod)"
-          - "Logins: {{ cbs_access_dir }}/rabbitmq-access-info.txt"
+          - "RabbitMQ is running: {{ db_host }}:5672 (UI :15672, admin: admin)"
+          - "Access info: {{ access_info_dir }}/{{ first_master }}-rabbitmq-access-info.txt"
       run_once: true
