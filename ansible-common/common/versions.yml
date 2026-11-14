@@ -53,6 +53,10 @@ postgres_image: "postgres:17-alpine"
 mongodb_image: "mongo:8.0"
 redis_image: "redis:7.4-alpine"
 rabbitmq_image: "rabbitmq:4.1-management-alpine"
+# ArgoCD shows the databases as Applications via this generic chart (it only renders
+# the manifests given in valuesObject). https://github.com/bedag/helm-charts/tree/master/charts/raw
+raw_chart_repo: "https://bedag.github.io/helm-charts/"
+raw_chart_version: "2.0.2"
 
 # --- Jenkins controller (jenkins.yml) ---
 # "latest" = newest LTS from https://pkg.jenkins.io/debian-stable (then apt-held).

@@ -2,7 +2,7 @@
 # ===========================================
 # Uninstall postgres (K3s namespace "databases") — DELETES ALL ITS DATA,
 # for every project that uses it. Asks for a typed confirmation.
-# The namespace and the other database services stay.
+# Deletes the ArgoCD Application first; the namespace and the other databases stay.
 # ===========================================
 - name: Uninstall postgres
   hosts: os_servers
@@ -12,6 +12,7 @@
     kubeconfig_path: /etc/rancher/k3s/k3s.yaml
     first_master: "{{ groups['os_servers'][0] }}"
     db_namespace: "{{ databases_namespace | default('databases') }}"
+    argocd_namespace: argocd
     db_name: postgres
 
   tasks:
@@ -27,7 +28,17 @@
       when: confirm.user_input | trim != 'delete ' ~ db_name
       run_once: true
 
-    - name: "[MASTER] Delete {{ db_name }} StatefulSet, Service, Secret and volume"
+    - name: "[MASTER] Delete ArgoCD Application {{ db_name }} (cascade: StatefulSet + Service)"
+      command: >
+        kubectl delete application {{ db_name }} -n {{ argocd_namespace }}
+        --ignore-not-found --wait=true --timeout=300s
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: app_delete
+      changed_when: "'deleted' in app_delete.stdout"
+      when: inventory_hostname == first_master
+
+    - name: "[MASTER] Delete leftovers: StatefulSet/Service (if created without ArgoCD), Secret, volume"
       shell: |
         K="kubectl -n {{ db_namespace }}"
         $K delete statefulset/{{ db_name }} service/{{ db_name }} --ignore-not-found --wait=true

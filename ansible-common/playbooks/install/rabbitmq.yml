@@ -8,6 +8,8 @@
 #
 #   Namespace : databases   (databases_namespace)
 #   Address   : rabbitmq.databases.svc.cluster.local:5672   (management UI :15672)
+#   ArgoCD    : Application "rabbitmq" (label stack=databases) — Service + StatefulSet via
+#               the bedag/raw chart; the admin Secret is created by Ansible, not ArgoCD
 #   Data      : local-path volume on the node labelled data-node=true
 #
 # Run:  ./terraform_main.sh raspberrypi rabbitmq
@@ -27,6 +29,7 @@
     db_namespace: "{{ databases_namespace | default('databases') }}"
     db_node: "{{ databases_node | default(groups['os_servers'][1] if (groups['os_servers'] | length) > 1 else groups['os_servers'][0]) }}"
     db_node_label: data-node
+    argocd_namespace: argocd
     db_size: "{{ rabbitmq_storage_size | default('5Gi') }}"
     db_host: "rabbitmq.{{ db_namespace }}.svc.cluster.local"
     access_info_dir: "{{ (playbook_dir ~ '/../../access-info') | realpath }}"
@@ -56,26 +59,81 @@
       changed_when: "'labeled' in node_label.stdout"
       when: is_master
 
-    - name: "[MASTER] Render manifest"
+    - name: "[MASTER] Check ArgoCD is installed"
+      command: kubectl get crd applications.argoproj.io
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: argocd_crd
+      changed_when: false
+      failed_when: false
+      when: is_master
+
+    - name: Fail if ArgoCD is not installed
+      fail:
+        msg: "ArgoCD not found. Install it first: ./terraform_main.sh <target> argocd"
+      when: is_master and argocd_crd.rc != 0
+
+    # The password stays OUT of ArgoCD (an Application spec is readable by
+    # anyone with ArgoCD access): Ansible creates the Secret, ArgoCD only
+    # manages the Service + StatefulSet that reference it.
+    - name: "[MASTER] Namespace + admin Secret"
+      shell: |
+        set -euo pipefail
+        kubectl create namespace {{ db_namespace }} --dry-run=client -o yaml | kubectl apply -f -
+        kubectl -n {{ db_namespace }} create secret generic rabbitmq-admin \
+          --from-literal=RABBITMQ_DEFAULT_USER=admin --from-literal=RABBITMQ_DEFAULT_PASS='{{ rabbitmq_admin_password }}' \
+          --dry-run=client -o yaml | kubectl apply -f -
+      args:
+        executable: /bin/bash
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: secret_apply
+      changed_when: "'created' in secret_apply.stdout or 'configured' in secret_apply.stdout"
+      no_log: true
+      when: is_master
+
+    - name: "[MASTER] Render ArgoCD Application rabbitmq"
       copy:
-        dest: /root/rabbitmq.yml
+        dest: /root/argocd-app-rabbitmq.yml
         mode: "0600"
-        content: |
-          apiVersion: v1
-          kind: Namespace
+        content: "{{ app_manifest | to_nice_yaml(indent=2, width=4096) }}"
+      vars:
+        app_manifest:
+          apiVersion: argoproj.io/v1alpha1
+          kind: Application
           metadata:
-            name: {{ db_namespace }}
-          ---
-          apiVersion: v1
-          kind: Secret
-          metadata:
-            name: rabbitmq-admin
-            namespace: {{ db_namespace }}
-          type: Opaque
-          stringData:
-            RABBITMQ_DEFAULT_USER: "admin"
-            RABBITMQ_DEFAULT_PASS: "{{ rabbitmq_admin_password }}"
-          ---
+            name: rabbitmq
+            namespace: "{{ argocd_namespace }}"
+            labels:
+              stack: databases
+            annotations:
+              argocd.argoproj.io/compare-options: ServerSideDiff=true
+            finalizers:
+              - resources-finalizer.argocd.argoproj.io
+          spec:
+            project: default
+            source:
+              repoURL: "{{ raw_chart_repo }}"
+              chart: raw
+              targetRevision: "{{ raw_chart_version }}"
+              helm:
+                releaseName: rabbitmq
+                valuesObject:
+                  resources: "{{ db_resources | from_yaml_all | list }}"
+            destination:
+              server: https://kubernetes.default.svc
+              namespace: "{{ db_namespace }}"
+            syncPolicy:
+              automated:
+                prune: true
+                selfHeal: true
+              syncOptions:
+                - CreateNamespace=true
+                - ServerSideApply=true
+              retry:
+                limit: 5
+                backoff: {duration: 10s, factor: 2, maxDuration: 3m}
+        db_resources: |
           apiVersion: v1
           kind: Service
           metadata:
@@ -135,27 +193,32 @@
                   accessModes: ["ReadWriteOnce"]
                   storageClassName: local-path
                   resources: {requests: {storage: {{ db_size }}}}
-      no_log: true
       when: is_master
 
-    - name: "[MASTER] Apply manifest"
-      command: kubectl apply -f /root/rabbitmq.yml
+    - name: "[MASTER] Apply ArgoCD Application rabbitmq"
+      command: kubectl apply -f /root/argocd-app-rabbitmq.yml
       environment:
         KUBECONFIG: "{{ kubeconfig_path }}"
-      register: db_apply
-      changed_when: "'created' in db_apply.stdout or 'configured' in db_apply.stdout"
+      register: app_apply
+      changed_when: "'created' in app_apply.stdout or 'configured' in app_apply.stdout"
       when: is_master
 
-    - name: "[MASTER] Remove rendered manifest (contains the password)"
+    - name: "[MASTER] Remove rendered Application"
       file:
-        path: /root/rabbitmq.yml
+        path: /root/argocd-app-rabbitmq.yml
         state: absent
       when: is_master
 
-    - name: "[MASTER] Wait for RabbitMQ (first start pulls the image: up to 10 min)"
-      command: kubectl -n {{ db_namespace }} rollout status statefulset/rabbitmq --timeout=600s
+    - name: "[MASTER] Wait for ArgoCD: rabbitmq Synced/Healthy (first start pulls the image: up to 10 min)"
+      command: >
+        kubectl get application rabbitmq -n {{ argocd_namespace }}
+        -o jsonpath='{.status.sync.status}/{.status.health.status}'
       environment:
         KUBECONFIG: "{{ kubeconfig_path }}"
+      register: app_status
+      until: app_status.stdout == "Synced/Healthy"
+      retries: 40
+      delay: 15
       changed_when: false
       when: is_master
 
@@ -177,6 +240,7 @@
           ===========================================================
           Version     : {{ db_version.stdout | default('') }}
           Namespace   : {{ db_namespace }}   (node {{ db_node }}, label {{ db_node_label }}=true)
+          ArgoCD      : Application rabbitmq  (Applications → filter label stack=databases)
           In cluster  : {{ db_host }}:5672   (management UI {{ db_host }}:15672)
           Admin       : admin / {{ rabbitmq_admin_password }}   (vhost /)
           Admin URI   : amqp://admin:{{ rabbitmq_admin_password }}@{{ db_host }}:5672/
