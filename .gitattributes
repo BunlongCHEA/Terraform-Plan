@@ -1,0 +1,17 @@
+# Always check out with Linux line endings (LF), also on Windows.
+# Scripts, playbooks and templates run on Linux / WSL; CRLF breaks them
+# ("/usr/bin/env: 'bash\r'", heredoc terminators, YAML block scalars).
+* text=auto eol=lf
+
+*.sh      text eol=lf
+*.yml     text eol=lf
+*.yaml    text eol=lf
+*.j2      text eol=lf
+*.tf      text eol=lf
+*.tftpl   text eol=lf
+*.example text eol=lf
+
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.gif  binary
