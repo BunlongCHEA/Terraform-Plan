@@ -1,0 +1,16 @@
+---
+# ===========================================
+# Uninstall redis (CBS data, namespace cbs-data) — DELETES its data for UAT + PROD.
+# Asks for a typed confirmation. Passwords in access-info/cbs-data/secrets are kept.
+# ===========================================
+- name: Uninstall redis (CBS)
+  hosts: os_servers
+  become: true
+  gather_facts: false
+  vars_files:
+    - "{{ playbook_dir }}/../../cbs-data/vars.yml"
+  vars:
+    cbs_component: redis
+  tasks:
+    - name: Remove redis
+      include_tasks: "{{ cbs_files_dir }}/tasks/uninstall.yml"

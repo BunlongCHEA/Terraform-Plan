@@ -1,0 +1,98 @@
+---
+# ===========================================
+# Ansible Playbook: PostgreSQL for CBS (inside K3s, namespace cbs-data)
+#
+#   One PostgreSQL server, shared by UAT and PROD:
+#     core_banking_uat   owner cbs_uat
+#     core_banking_prod  owner cbs_prod
+#   Each user can only connect to its own database.
+#
+# Run:  ./terraform_main.sh raspberrypi postgres
+# Then: ./terraform_main.sh raspberrypi cbs-env   (writes cbs-uat.env / cbs-prod.env)
+# Needs: K3s + jenkins.yml (creates the cbs-uat / cbs-prod namespaces)
+# ===========================================
+- name: Install PostgreSQL for CBS
+  hosts: os_servers
+  become: true
+  gather_facts: true
+  any_errors_fatal: true
+  vars_files:
+    - "{{ playbook_dir }}/../../common/versions.yml"
+    - "{{ playbook_dir }}/../../cbs-data/vars.yml"
+
+  tasks:
+    - name: Passwords
+      include_tasks: "{{ cbs_files_dir }}/tasks/passwords.yml"
+
+    - name: Namespace + node label
+      include_tasks: "{{ cbs_files_dir }}/tasks/prepare.yml"
+
+    - name: Deploy PostgreSQL
+      include_tasks: "{{ cbs_files_dir }}/tasks/apply.yml"
+      vars:
+        cbs_manifest: postgres
+        cbs_wait_statefulset: postgres
+
+    - name: "[MASTER] Create / update role + database per env"
+      shell: |
+        set -euo pipefail
+        kubectl -n {{ cbs_data_namespace }} exec -i postgres-0 -- psql -U postgres -v ON_ERROR_STOP=1 <<'SQL'
+        {% for e in cbs_envs %}
+        DO $$BEGIN
+          IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'cbs_{{ e }}') THEN
+            CREATE ROLE cbs_{{ e }} LOGIN PASSWORD '{{ pw['pg_' ~ e] }}';
+          ELSE
+            ALTER ROLE cbs_{{ e }} LOGIN PASSWORD '{{ pw['pg_' ~ e] }}';
+          END IF;
+        END$$;
+        SELECT 'CREATE DATABASE core_banking_{{ e }} OWNER cbs_{{ e }}'
+          WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = 'core_banking_{{ e }}')\gexec
+        REVOKE ALL ON DATABASE core_banking_{{ e }} FROM PUBLIC;
+        GRANT ALL ON DATABASE core_banking_{{ e }} TO cbs_{{ e }};
+        {% endfor %}
+        SQL
+      args:
+        executable: /bin/bash
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      no_log: true
+      changed_when: false
+      when: is_master
+
+    - name: "[MASTER] List databases"
+      command: >
+        kubectl -n {{ cbs_data_namespace }} exec postgres-0 --
+        psql -U postgres -tAc "SELECT datname || ' (owner ' || pg_get_userbyid(datdba) || ')' FROM pg_database WHERE datname LIKE 'core_banking_%'"
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: pg_dbs
+      changed_when: false
+      when: is_master
+
+    - name: "[LOCAL] Write access info"
+      copy:
+        dest: "{{ cbs_access_dir }}/postgres-access-info.txt"
+        mode: "0600"
+        content: |
+          PostgreSQL ({{ cbs_postgres_image }}) — namespace {{ cbs_data_namespace }}, node {{ cbs_data_host }}
+          In cluster : {{ cbs_hosts.postgres }}:5432
+          Admin      : postgres / {{ pw.postgres_admin }}
+          {% for e in cbs_envs %}
+          {{ (e | upper).ljust(11) }}: db core_banking_{{ e }}  user cbs_{{ e }} / {{ pw['pg_' ~ e] }}
+          {% endfor %}
+          From laptop: on {{ first_master }} run
+            sudo kubectl -n {{ cbs_data_namespace }} port-forward --address 0.0.0.0 svc/postgres 5432:5432
+            then connect DBeaver/psql to <{{ first_master }}-ip>:5432
+      no_log: true
+      delegate_to: localhost
+      become: false
+      run_once: true
+
+    - name: Summary
+      debug:
+        msg:
+          - "PostgreSQL is running: {{ cbs_hosts.postgres }}:5432"
+          - "Databases: {{ pg_dbs.stdout_lines | default([]) | join(', ') }}"
+          - "Logins   : {{ cbs_access_dir }}/postgres-access-info.txt"
+          - "Next     : install mongodb / redis / rabbitmq, then ./terraform_main.sh <target> cbs-env"
+      run_once: true

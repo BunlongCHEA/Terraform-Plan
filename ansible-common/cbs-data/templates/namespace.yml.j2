@@ -1,0 +1,28 @@
+# =============================================================
+# Namespace for the CBS data services + who may connect to them.
+# Rendered by every CBS data playbook (postgres/mongodb/redis/rabbitmq.yml).
+# =============================================================
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ cbs_data_namespace }}
+  labels:
+    app.kubernetes.io/managed-by: ansible
+    app.kubernetes.io/part-of: cbs-data
+---
+# Only the CBS namespaces (label app.kubernetes.io/part-of=cbs, set by
+# jenkins.yml on cbs-uat / cbs-prod) and this namespace may connect.
+# `kubectl port-forward` still works for you (it bypasses this policy).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-cbs-only
+  namespace: {{ cbs_data_namespace }}
+spec:
+  podSelector: {}
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels: {app.kubernetes.io/part-of: cbs}
+        - podSelector: {}

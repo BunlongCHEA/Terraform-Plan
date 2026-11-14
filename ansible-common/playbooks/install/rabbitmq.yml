@@ -1,0 +1,81 @@
+---
+# ===========================================
+# Ansible Playbook: RabbitMQ for CBS (inside K3s, namespace cbs-data)
+#
+#   One broker, shared by UAT and PROD:
+#     vhost cbs_uat   user cbs_uat   (full rights on that vhost only)
+#     vhost cbs_prod  user cbs_prod
+#   CBS declares its own exchange/queues at startup.
+#
+# Run:  ./terraform_main.sh raspberrypi rabbitmq
+# Then: ./terraform_main.sh raspberrypi cbs-env
+# ===========================================
+- name: Install RabbitMQ for CBS
+  hosts: os_servers
+  become: true
+  gather_facts: true
+  any_errors_fatal: true
+  vars_files:
+    - "{{ playbook_dir }}/../../common/versions.yml"
+    - "{{ playbook_dir }}/../../cbs-data/vars.yml"
+
+  tasks:
+    - name: Passwords
+      include_tasks: "{{ cbs_files_dir }}/tasks/passwords.yml"
+
+    - name: Namespace + node label
+      include_tasks: "{{ cbs_files_dir }}/tasks/prepare.yml"
+
+    - name: Deploy RabbitMQ
+      include_tasks: "{{ cbs_files_dir }}/tasks/apply.yml"
+      vars:
+        cbs_manifest: rabbitmq
+        cbs_wait_statefulset: rabbitmq
+
+    - name: "[MASTER] Create / update vhost + user per env"
+      shell: |
+        set -euo pipefail
+        R="kubectl -n {{ cbs_data_namespace }} exec rabbitmq-0 -- rabbitmqctl -q"
+        {% for e in cbs_envs %}
+        $R list_vhosts --no-table-headers | grep -qx 'cbs_{{ e }}' || $R add_vhost 'cbs_{{ e }}'
+        if $R list_users --no-table-headers | awk '{print $1}' | grep -qx 'cbs_{{ e }}'; then
+          $R change_password 'cbs_{{ e }}' '{{ pw['rabbitmq_' ~ e] }}'
+        else
+          $R add_user 'cbs_{{ e }}' '{{ pw['rabbitmq_' ~ e] }}'
+        fi
+        $R set_permissions -p 'cbs_{{ e }}' 'cbs_{{ e }}' '.*' '.*' '.*'
+        {% endfor %}
+      args:
+        executable: /bin/bash
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      no_log: true
+      changed_when: false
+      when: is_master
+
+    - name: "[LOCAL] Write access info"
+      copy:
+        dest: "{{ cbs_access_dir }}/rabbitmq-access-info.txt"
+        mode: "0600"
+        content: |
+          RabbitMQ ({{ cbs_rabbitmq_image }}) — namespace {{ cbs_data_namespace }}, node {{ cbs_data_host }}
+          In cluster : {{ cbs_hosts.rabbitmq }}:5672   (management UI :15672)
+          Admin      : admin / {{ pw.rabbitmq_admin }}
+          {% for e in cbs_envs %}
+          {{ (e | upper).ljust(11) }}: vhost cbs_{{ e }}  user cbs_{{ e }} / {{ pw['rabbitmq_' ~ e] }}
+          {% endfor %}
+          UI from laptop: on {{ first_master }} run
+            sudo kubectl -n {{ cbs_data_namespace }} port-forward --address 0.0.0.0 svc/rabbitmq 15672:15672
+            then open http://<{{ first_master }}-ip>:15672  (admin login)
+      no_log: true
+      delegate_to: localhost
+      become: false
+      run_once: true
+
+    - name: Summary
+      debug:
+        msg:
+          - "RabbitMQ is running: {{ cbs_hosts.rabbitmq }}:5672 (vhosts cbs_uat, cbs_prod)"
+          - "Logins: {{ cbs_access_dir }}/rabbitmq-access-info.txt"
+          - "Next  : ./terraform_main.sh <target> cbs-env  (after all 4 data services)"
+      run_once: true

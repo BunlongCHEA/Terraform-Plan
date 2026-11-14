@@ -1,0 +1,34 @@
+---
+# Remove ONE CBS data service (cbs_component) incl. its volume = its DATA.
+# Needs the typed confirmation; the namespace and the other services stay.
+- name: "Confirm deleting {{ cbs_component }}"
+  pause:
+    prompt: "This DELETES {{ cbs_component }} and ALL its data (UAT + PROD). Type: delete {{ cbs_component }}"
+  register: cbs_confirm
+  run_once: true
+
+- name: Stop unless confirmed
+  fail:
+    msg: "Not confirmed — nothing deleted."
+  when: cbs_confirm.user_input | trim != 'delete ' ~ cbs_component
+  run_once: true
+
+- name: "[MASTER] Delete {{ cbs_component }} StatefulSet, Service, Secrets, volume"
+  shell: |
+    set -u
+    K="kubectl -n {{ cbs_data_namespace }}"
+    $K delete statefulset/{{ cbs_component }} service/{{ cbs_component }} --ignore-not-found --wait=true
+    $K delete secret {{ cbs_component }}-admin {{ 'redis-conf' if cbs_component == 'redis' else '' }} --ignore-not-found
+    $K delete pvc data-{{ cbs_component }}-0 --ignore-not-found
+  args:
+    executable: /bin/bash
+  environment:
+    KUBECONFIG: "{{ kubeconfig_path }}"
+  when: is_master
+
+- name: Summary
+  debug:
+    msg:
+      - "{{ cbs_component }} removed from namespace {{ cbs_data_namespace }}."
+      - "Its passwords are kept in {{ cbs_secrets_dir }} — a re-install re-uses them."
+  run_once: true

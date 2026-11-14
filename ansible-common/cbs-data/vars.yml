@@ -1,0 +1,37 @@
+# =============================================================
+# Shared settings for the CBS data playbooks:
+#   playbooks/install/postgres.yml | mongodb.yml | redis.yml | rabbitmq.yml | cbs-env.yml
+# Everything runs inside K3s, namespace cbs-data, ONE instance of each tool,
+# shared by UAT and PROD with a separate database / user / vhost per env.
+# =============================================================
+kubeconfig_path: /etc/rancher/k3s/k3s.yaml
+cbs_files_dir: "{{ playbook_dir }}/../../cbs-data"
+first_master: "{{ groups['os_servers'][0] }}"
+is_master: "{{ inventory_hostname == first_master }}"
+
+cbs_data_namespace: cbs-data
+cbs_envs: [uat, prod]
+
+# All data Pods are pinned to ONE node so their local-path volumes stay on its disk:
+# the 2nd host (k8, SSD) — or the only host on a single-node cluster.
+cbs_data_host: "{{ groups['os_servers'][1] if (groups['os_servers'] | length) > 1 else groups['os_servers'][0] }}"
+cbs_data_node_label: "cbs.data/node"
+
+# Volume sizes / memory
+cbs_postgres_size: 20Gi
+cbs_mongo_size: 10Gi
+cbs_redis_size: 2Gi
+cbs_rabbitmq_size: 5Gi
+cbs_redis_maxmemory: 512mb
+cbs_mongo_cache_gb: "0.5"
+
+# Generated passwords + output files live on YOUR machine (git-ignored)
+cbs_access_dir: "{{ (playbook_dir ~ '/../../access-info') | realpath }}/cbs-data"
+cbs_secrets_dir: "{{ cbs_access_dir }}/secrets"
+
+# In-cluster addresses (what the CBS pods connect to)
+cbs_hosts:
+  postgres: "postgres.{{ cbs_data_namespace }}.svc.cluster.local"
+  mongodb: "mongodb.{{ cbs_data_namespace }}.svc.cluster.local"
+  redis: "redis.{{ cbs_data_namespace }}.svc.cluster.local"
+  rabbitmq: "rabbitmq.{{ cbs_data_namespace }}.svc.cluster.local"

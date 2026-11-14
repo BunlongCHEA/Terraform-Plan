@@ -1,0 +1,34 @@
+---
+# Render templates/<cbs_manifest>.yml.j2, kubectl apply it, wait for the
+# StatefulSet <cbs_wait_statefulset> (if set), then delete the rendered file
+# (it can contain passwords).
+- name: "[MASTER] Render {{ cbs_manifest }} manifest"
+  template:
+    src: "{{ cbs_files_dir }}/templates/{{ cbs_manifest }}.yml.j2"
+    dest: "/root/cbs-{{ cbs_manifest }}.yml"
+    mode: "0600"
+  no_log: true
+  when: is_master
+
+- name: "[MASTER] Apply {{ cbs_manifest }}"
+  command: kubectl apply -f /root/cbs-{{ cbs_manifest }}.yml
+  environment:
+    KUBECONFIG: "{{ kubeconfig_path }}"
+  register: cbs_apply
+  changed_when: "'created' in cbs_apply.stdout or 'configured' in cbs_apply.stdout"
+  when: is_master
+
+- name: "[MASTER] Remove rendered {{ cbs_manifest }} manifest"
+  file:
+    path: "/root/cbs-{{ cbs_manifest }}.yml"
+    state: absent
+  when: is_master
+
+- name: "[MASTER] Wait for {{ cbs_wait_statefulset }} (first start pulls the image: up to 10 min)"
+  command: kubectl -n {{ cbs_data_namespace }} rollout status statefulset/{{ cbs_wait_statefulset }} --timeout=600s
+  environment:
+    KUBECONFIG: "{{ kubeconfig_path }}"
+  changed_when: false
+  when:
+    - is_master
+    - cbs_wait_statefulset | length > 0

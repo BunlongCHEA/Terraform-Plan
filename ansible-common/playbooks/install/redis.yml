@@ -1,0 +1,69 @@
+---
+# ===========================================
+# Ansible Playbook: Redis for CBS (inside K3s, namespace cbs-data)
+#
+#   One Redis server, shared by UAT and PROD:
+#     UAT  → DB 1, ACL user cbs_uat
+#     PROD → DB 0, ACL user cbs_prod
+#   Users are defined in redis.conf (Secret redis-conf); re-running this
+#   playbook after a password change restarts Redis with the new users.
+#
+# Run:  ./terraform_main.sh raspberrypi redis
+# Then: ./terraform_main.sh raspberrypi cbs-env
+# ===========================================
+- name: Install Redis for CBS
+  hosts: os_servers
+  become: true
+  gather_facts: true
+  any_errors_fatal: true
+  vars_files:
+    - "{{ playbook_dir }}/../../common/versions.yml"
+    - "{{ playbook_dir }}/../../cbs-data/vars.yml"
+
+  tasks:
+    - name: Passwords
+      include_tasks: "{{ cbs_files_dir }}/tasks/passwords.yml"
+
+    - name: Namespace + node label
+      include_tasks: "{{ cbs_files_dir }}/tasks/prepare.yml"
+
+    - name: Deploy Redis
+      include_tasks: "{{ cbs_files_dir }}/tasks/apply.yml"
+      vars:
+        cbs_manifest: redis
+        cbs_wait_statefulset: redis
+
+    - name: "[MASTER] Check ACL users are loaded"
+      command: kubectl -n {{ cbs_data_namespace }} exec redis-0 -- redis-cli ACL USERS
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: redis_users
+      changed_when: false
+      failed_when: "cbs_envs | map('regex_replace', '^', 'cbs_') | difference(redis_users.stdout_lines) | length > 0"
+      when: is_master
+
+    - name: "[LOCAL] Write access info"
+      copy:
+        dest: "{{ cbs_access_dir }}/redis-access-info.txt"
+        mode: "0600"
+        content: |
+          Redis ({{ cbs_redis_image }}) — namespace {{ cbs_data_namespace }}, node {{ cbs_data_host }}
+          In cluster : {{ cbs_hosts.redis }}:6379
+          Admin      : default / {{ pw.redis_admin }}
+          {% for e in cbs_envs %}
+          {{ (e | upper).ljust(11) }}: DB {{ 0 if e == 'prod' else 1 }}  user cbs_{{ e }} / {{ pw['redis_' ~ e] }}
+          {% endfor %}
+          Inspect: on {{ first_master }} run
+            sudo kubectl -n {{ cbs_data_namespace }} exec -it redis-0 -- redis-cli      (already authenticated as admin)
+      no_log: true
+      delegate_to: localhost
+      become: false
+      run_once: true
+
+    - name: Summary
+      debug:
+        msg:
+          - "Redis is running: {{ cbs_hosts.redis }}:6379  ACL users: {{ redis_users.stdout_lines | default([]) | join(', ') }}"
+          - "Logins: {{ cbs_access_dir }}/redis-access-info.txt"
+          - "Next  : ./terraform_main.sh <target> cbs-env  (after all 4 data services)"
+      run_once: true

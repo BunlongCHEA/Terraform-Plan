@@ -1,0 +1,85 @@
+---
+# ===========================================
+# Ansible Playbook: MongoDB for CBS (inside K3s, namespace cbs-data)
+#
+#   One MongoDB server, shared by UAT and PROD:
+#     cbs_logs_uat   user cbs_uat  (readWrite on that database only)
+#     cbs_logs_prod  user cbs_prod
+#
+# Run:  ./terraform_main.sh raspberrypi mongodb
+# Then: ./terraform_main.sh raspberrypi cbs-env
+# ===========================================
+- name: Install MongoDB for CBS
+  hosts: os_servers
+  become: true
+  gather_facts: true
+  any_errors_fatal: true
+  vars_files:
+    - "{{ playbook_dir }}/../../common/versions.yml"
+    - "{{ playbook_dir }}/../../cbs-data/vars.yml"
+
+  tasks:
+    - name: Passwords
+      include_tasks: "{{ cbs_files_dir }}/tasks/passwords.yml"
+
+    - name: Namespace + node label
+      include_tasks: "{{ cbs_files_dir }}/tasks/prepare.yml"
+
+    - name: Deploy MongoDB
+      include_tasks: "{{ cbs_files_dir }}/tasks/apply.yml"
+      vars:
+        cbs_manifest: mongodb
+        cbs_wait_statefulset: mongodb
+
+    - name: "[MASTER] Create / update user per env"
+      shell: |
+        set -euo pipefail
+        kubectl -n {{ cbs_data_namespace }} exec -i mongodb-0 -- \
+          mongosh --quiet -u root -p '{{ pw.mongo_admin }}' --authenticationDatabase admin <<'JS'
+        const users = [
+        {% for e in cbs_envs %}
+          ["cbs_{{ e }}", "{{ pw['mongo_' ~ e] }}", "cbs_logs_{{ e }}"],
+        {% endfor %}
+        ];
+        for (const [u, p, d] of users) {
+          const t = db.getSiblingDB(d);
+          const roles = [{ role: "readWrite", db: d }];
+          if (t.getUser(u)) { t.updateUser(u, { pwd: p, roles: roles }); }
+          else { t.createUser({ user: u, pwd: p, roles: roles }); }
+          print("ok " + u + " @ " + d);
+        }
+        JS
+      args:
+        executable: /bin/bash
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      no_log: true
+      changed_when: false
+      when: is_master
+
+    - name: "[LOCAL] Write access info"
+      copy:
+        dest: "{{ cbs_access_dir }}/mongodb-access-info.txt"
+        mode: "0600"
+        content: |
+          MongoDB ({{ cbs_mongo_image }}) — namespace {{ cbs_data_namespace }}, node {{ cbs_data_host }}
+          In cluster : {{ cbs_hosts.mongodb }}:27017
+          Admin      : root / {{ pw.mongo_admin }}   (authSource=admin)
+          {% for e in cbs_envs %}
+          {{ (e | upper).ljust(11) }}: db cbs_logs_{{ e }}  user cbs_{{ e }} / {{ pw['mongo_' ~ e] }}  (authSource=cbs_logs_{{ e }})
+          {% endfor %}
+          From laptop: on {{ first_master }} run
+            sudo kubectl -n {{ cbs_data_namespace }} port-forward --address 0.0.0.0 svc/mongodb 27017:27017
+            then MongoDB Compass → mongodb://root:<admin-pw>@<{{ first_master }}-ip>:27017/?authSource=admin
+      no_log: true
+      delegate_to: localhost
+      become: false
+      run_once: true
+
+    - name: Summary
+      debug:
+        msg:
+          - "MongoDB is running: {{ cbs_hosts.mongodb }}:27017 (users cbs_uat, cbs_prod)"
+          - "Logins: {{ cbs_access_dir }}/mongodb-access-info.txt"
+          - "Next  : ./terraform_main.sh <target> cbs-env  (after all 4 data services)"
+      run_once: true

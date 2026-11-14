@@ -46,6 +46,14 @@ otel_collector_chart_version: "0.175.1"   # app otelcol-contrib 0.161.0
 # --- Kyverno (kyverno.yml) ---
 kyverno_version: "1.19.1"        # https://github.com/kyverno/kyverno/releases
 
+# --- CBS databases in K3s (postgres.yml / mongodb.yml / redis.yml / rabbitmq.yml) ---
+# PostgreSQL major version = the pg_dump image in the CBS Jenkinsfile (prod backup).
+# MongoDB 5+ needs AVX (x86) / ARMv8.2-A (arm64) on the data node.
+cbs_postgres_image: "postgres:17-alpine"
+cbs_mongo_image: "mongo:8.0"
+cbs_redis_image: "redis:7.4-alpine"
+cbs_rabbitmq_image: "rabbitmq:4.1-management-alpine"
+
 # --- Jenkins controller (jenkins.yml) ---
 # "latest" = newest LTS from https://pkg.jenkins.io/debian-stable (then apt-held).
 # To pin:  apt-cache madison jenkins   →  e.g. jenkins_version: "2.580.2"

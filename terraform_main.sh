@@ -5,6 +5,7 @@
 #   target:  digitalocean | gke | raspberrypi
 #   command: all | init | validate | plan | apply | output | destroy | test |
 #            ansible | rancher | argocd | prometheus | grafana | logging | jenkins |
+#            postgres | mongodb | redis | rabbitmq | cbs-env |
 #            install | uninstall | help
 #
 # Examples:
@@ -35,6 +36,7 @@ Usage: $0 <target> <command>
   target:  digitalocean | gke | raspberrypi
   command: all | init | validate | plan | apply | output | destroy | test |
            ansible | rancher | argocd | prometheus | grafana | logging | jenkins |
+           postgres | mongodb | redis | rabbitmq | cbs-env |
            install | uninstall | help
 EOF
     exit 0
@@ -210,6 +212,52 @@ uninstall_monitoring_menu() {
     *) print_error "Invalid choice" ;;
   esac
 }
+
+# ---- CBS database sub-menus (option 7 install / option 7 uninstall) ----
+# All in K3s namespace cbs-data, shared by UAT + PROD (own DB/user per env).
+install_cbs_data_menu() {
+  echo "Select CBS database component:"
+  echo "  1) PostgreSQL   (postgres.yml - core_banking_uat / core_banking_prod)"
+  echo "  2) MongoDB      (mongodb.yml  - cbs_logs_uat / cbs_logs_prod)"
+  echo "  3) Redis        (redis.yml    - UAT DB 1 / PROD DB 0)"
+  echo "  4) RabbitMQ     (rabbitmq.yml - vhost cbs_uat / cbs_prod)"
+  echo "  5) All four, then write cbs-uat.env / cbs-prod.env"
+  echo "  6) Env files only (cbs-env.yml - after changing a password)"
+  echo "  7) Back"
+  read -r -p "Enter choice [1-7]: " c
+  case $c in
+    1) run_playbook "Install PostgreSQL" "$P_INSTALL/postgres.yml" ;;
+    2) run_playbook "Install MongoDB"    "$P_INSTALL/mongodb.yml" ;;
+    3) run_playbook "Install Redis"      "$P_INSTALL/redis.yml" ;;
+    4) run_playbook "Install RabbitMQ"   "$P_INSTALL/rabbitmq.yml" ;;
+    5) run_playbook "Install PostgreSQL" "$P_INSTALL/postgres.yml"
+       run_playbook "Install MongoDB"    "$P_INSTALL/mongodb.yml"
+       run_playbook "Install Redis"      "$P_INSTALL/redis.yml"
+       run_playbook "Install RabbitMQ"   "$P_INSTALL/rabbitmq.yml"
+       run_playbook "CBS env files"      "$P_INSTALL/cbs-env.yml" ;;
+    6) run_playbook "CBS env files"      "$P_INSTALL/cbs-env.yml" ;;
+    7) return 0 ;;
+    *) print_error "Invalid choice" ;;
+  esac
+}
+
+uninstall_cbs_data_menu() {
+  echo "Select CBS database to uninstall (DELETES its data, asks to confirm):"
+  echo "  1) PostgreSQL"
+  echo "  2) MongoDB"
+  echo "  3) Redis"
+  echo "  4) RabbitMQ"
+  echo "  5) Back"
+  read -r -p "Enter choice [1-5]: " c
+  case $c in
+    1) run_playbook "Uninstall PostgreSQL" "$P_UNINSTALL/postgres.yml" ;;
+    2) run_playbook "Uninstall MongoDB"    "$P_UNINSTALL/mongodb.yml" ;;
+    3) run_playbook "Uninstall Redis"      "$P_UNINSTALL/redis.yml" ;;
+    4) run_playbook "Uninstall RabbitMQ"   "$P_UNINSTALL/rabbitmq.yml" ;;
+    5) return 0 ;;
+    *) print_error "Invalid choice" ;;
+  esac
+}
  
 install_menu() {
   echo "Select installation option:"
@@ -219,8 +267,9 @@ install_menu() {
   echo "  4) Monitoring (Prometheus / Grafana stack) ->"
   echo "  5) Logging (Elasticsearch + Kibana + Alloy/Fluent Bit shipper)"
   echo "  6) Jenkins (controller on first host, build agents as Pods on the others)"
-  echo "  7) All of the above (1-5, without Jenkins)"
-  echo "  8) Skip"
+  echo "  7) CBS databases (PostgreSQL / MongoDB / Redis / RabbitMQ) ->"
+  echo "  8) All of the above (1-5, without Jenkins / CBS databases)"
+  echo "  9) Skip"
   read -p "Enter choice: " c
   case "$c" in
     1) run_playbook "Install Ansible"       "$P_INSTALL/ansible.yml" ;;
@@ -229,7 +278,8 @@ install_menu() {
     4) install_monitoring_menu ;;
     5) run_playbook "Install Logging"       "$P_INSTALL/logging.yml" ;;
     6) run_playbook "Install Jenkins"       "$P_INSTALL/jenkins.yml" ;;
-    7) run_playbook "Install Ansible"       "$P_INSTALL/ansible.yml"
+    7) install_cbs_data_menu ;;
+    8) run_playbook "Install Ansible"       "$P_INSTALL/ansible.yml"
        run_rancher
        run_playbook "Install ArgoCD"        "$P_INSTALL/argocd.yml"
        run_playbook "Install Prometheus"    "$P_INSTALL/prometheus.yml"
@@ -237,7 +287,7 @@ install_menu() {
        # on when it finds logging.yml's otel-collector.
        run_playbook "Install Logging"       "$P_INSTALL/logging.yml"
        run_playbook "Install Grafana stack" "$P_INSTALL/grafana.yml" ;;
-    8) print_info "Skipping software installation" ;;
+    9) print_info "Skipping software installation" ;;
     *) print_error "Invalid choice" ;;
   esac
 }
@@ -250,7 +300,8 @@ uninstall_menu() {
   echo "  4) Rancher & K3s (WARNING: removes entire cluster)"
   echo "  5) Everything (Logging + Grafana stack + Prometheus + ArgoCD + Rancher)"
   echo "  6) Jenkins (controller + agent namespace; keeps cbs-uat/cbs-prod)"
-  echo "  7) Back"
+  echo "  7) CBS databases ->"
+  echo "  8) Back"
   read -p "Enter choice: " c
   case "$c" in
     1) uninstall_monitoring_menu ;;
@@ -271,7 +322,8 @@ uninstall_menu() {
          run_playbook "Uninstall Rancher"       "$P_UNINSTALL/rancher.yml"
        fi ;;
     6) run_playbook "Uninstall Jenkins"    "$P_UNINSTALL/jenkins.yml" ;;
-    7) return 0 ;;
+    7) uninstall_cbs_data_menu ;;
+    8) return 0 ;;
     *) print_error "Invalid choice" ;;
   esac
 }
@@ -316,6 +368,11 @@ Usage: $0 <target> <command>
     grafana        Install Grafana + Loki + Tempo + Alloy (via ArgoCD)
     logging        Install Elasticsearch + Kibana + log shipper (ECK, via ArgoCD)
     jenkins        Install Jenkins controller (first host) + K8s build agents (other hosts)
+    postgres       Install PostgreSQL for CBS  (K3s ns cbs-data, DB+user per env)
+    mongodb        Install MongoDB for CBS
+    redis          Install Redis for CBS
+    rabbitmq       Install RabbitMQ for CBS
+    cbs-env        Write cbs-uat.env / cbs-prod.env for Jenkins (after the 4 above)
     install        Show install menu
     uninstall      Show uninstall menu
     help           Show this help
@@ -356,6 +413,11 @@ case "$COMMAND" in
   grafana)    run_playbook "Install Grafana stack" "$P_INSTALL/grafana.yml" ;;
   logging)    run_playbook "Install Logging"       "$P_INSTALL/logging.yml" ;;
   jenkins)    run_playbook "Install Jenkins"       "$P_INSTALL/jenkins.yml" ;;
+  postgres)   run_playbook "Install PostgreSQL"    "$P_INSTALL/postgres.yml" ;;
+  mongodb)    run_playbook "Install MongoDB"       "$P_INSTALL/mongodb.yml" ;;
+  redis)      run_playbook "Install Redis"         "$P_INSTALL/redis.yml" ;;
+  rabbitmq)   run_playbook "Install RabbitMQ"      "$P_INSTALL/rabbitmq.yml" ;;
+  cbs-env)    run_playbook "CBS env files"         "$P_INSTALL/cbs-env.yml" ;;
   install)    install_menu ;;
   uninstall)  uninstall_menu ;;
   help|*)     show_help ;;
