@@ -8,7 +8,6 @@
 #   Each user can only connect to its own database.
 #
 # Run:  ./terraform_main.sh raspberrypi postgres
-# Then: ./terraform_main.sh raspberrypi cbs-env   (writes cbs-uat.env / cbs-prod.env)
 # Needs: K3s + jenkins.yml (creates the cbs-uat / cbs-prod namespaces)
 # ===========================================
 - name: Install PostgreSQL for CBS
@@ -83,6 +82,15 @@
           From laptop: on {{ first_master }} run
             sudo kubectl -n {{ cbs_data_namespace }} port-forward --address 0.0.0.0 svc/postgres 5432:5432
             then connect DBeaver/psql to <{{ first_master }}-ip>:5432
+          {% for e in cbs_envs %}
+
+          Lines for cbs-{{ e }}.env:
+            DB_HOST={{ cbs_hosts.postgres }}
+            DB_PORT=5432
+            DB_NAME=core_banking_{{ e }}
+            DB_USERNAME=cbs_{{ e }}
+            DB_PASSWORD={{ pw['pg_' ~ e] }}
+          {% endfor %}
       no_log: true
       delegate_to: localhost
       become: false
@@ -94,5 +102,4 @@
           - "PostgreSQL is running: {{ cbs_hosts.postgres }}:5432"
           - "Databases: {{ pg_dbs.stdout_lines | default([]) | join(', ') }}"
           - "Logins   : {{ cbs_access_dir }}/postgres-access-info.txt"
-          - "Next     : install mongodb / redis / rabbitmq, then ./terraform_main.sh <target> cbs-env"
       run_once: true

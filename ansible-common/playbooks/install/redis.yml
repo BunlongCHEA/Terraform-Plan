@@ -9,7 +9,6 @@
 #   playbook after a password change restarts Redis with the new users.
 #
 # Run:  ./terraform_main.sh raspberrypi redis
-# Then: ./terraform_main.sh raspberrypi cbs-env
 # ===========================================
 - name: Install Redis for CBS
   hosts: os_servers
@@ -55,6 +54,11 @@
           {% endfor %}
           Inspect: on {{ first_master }} run
             sudo kubectl -n {{ cbs_data_namespace }} exec -it redis-0 -- redis-cli      (already authenticated as admin)
+          {% for e in cbs_envs %}
+
+          Line for cbs-{{ e }}.env:
+            REDIS_URI=redis://cbs_{{ e }}:{{ pw['redis_' ~ e] }}@{{ cbs_hosts.redis }}:6379/{{ 0 if e == 'prod' else 1 }}
+          {% endfor %}
       no_log: true
       delegate_to: localhost
       become: false
@@ -65,5 +69,4 @@
         msg:
           - "Redis is running: {{ cbs_hosts.redis }}:6379  ACL users: {{ redis_users.stdout_lines | default([]) | join(', ') }}"
           - "Logins: {{ cbs_access_dir }}/redis-access-info.txt"
-          - "Next  : ./terraform_main.sh <target> cbs-env  (after all 4 data services)"
       run_once: true

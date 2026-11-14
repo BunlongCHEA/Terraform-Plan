@@ -1,6 +1,6 @@
 # =============================================================
 # Shared settings for the CBS data playbooks:
-#   playbooks/install/postgres.yml | mongodb.yml | redis.yml | rabbitmq.yml | cbs-env.yml
+#   playbooks/install/postgres.yml | mongodb.yml | redis.yml | rabbitmq.yml
 # Everything runs inside K3s, namespace cbs-data, ONE instance of each tool,
 # shared by UAT and PROD with a separate database / user / vhost per env.
 # =============================================================
@@ -25,7 +25,7 @@ cbs_rabbitmq_size: 5Gi
 cbs_redis_maxmemory: 512mb
 cbs_mongo_cache_gb: "0.5"
 
-# Generated passwords + output files live on YOUR machine (git-ignored)
+# Generated passwords + access-info files live on YOUR machine (git-ignored)
 cbs_access_dir: "{{ (playbook_dir ~ '/../../access-info') | realpath }}/cbs-data"
 cbs_secrets_dir: "{{ cbs_access_dir }}/secrets"
 

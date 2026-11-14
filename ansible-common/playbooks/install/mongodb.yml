@@ -7,7 +7,6 @@
 #     cbs_logs_prod  user cbs_prod
 #
 # Run:  ./terraform_main.sh raspberrypi mongodb
-# Then: ./terraform_main.sh raspberrypi cbs-env
 # ===========================================
 - name: Install MongoDB for CBS
   hosts: os_servers
@@ -71,6 +70,11 @@
           From laptop: on {{ first_master }} run
             sudo kubectl -n {{ cbs_data_namespace }} port-forward --address 0.0.0.0 svc/mongodb 27017:27017
             then MongoDB Compass → mongodb://root:<admin-pw>@<{{ first_master }}-ip>:27017/?authSource=admin
+          {% for e in cbs_envs %}
+
+          Line for cbs-{{ e }}.env:
+            MONGO_URI=mongodb://cbs_{{ e }}:{{ pw['mongo_' ~ e] }}@{{ cbs_hosts.mongodb }}:27017/cbs_logs_{{ e }}?authSource=cbs_logs_{{ e }}
+          {% endfor %}
       no_log: true
       delegate_to: localhost
       become: false
@@ -81,5 +85,4 @@
         msg:
           - "MongoDB is running: {{ cbs_hosts.mongodb }}:27017 (users cbs_uat, cbs_prod)"
           - "Logins: {{ cbs_access_dir }}/mongodb-access-info.txt"
-          - "Next  : ./terraform_main.sh <target> cbs-env  (after all 4 data services)"
       run_once: true

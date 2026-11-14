@@ -551,8 +551,8 @@
             gitlab-registry-pull  Username+Password  deploy token (read_registry)
             kubeconfig-cbs-uat    Secret file        file above
             kubeconfig-cbs-prod   Secret file        file above
-            cbs-uat-env           Secret file        filled deploy/cbs.env.example (uat)
-            cbs-prod-env          Secret file        filled deploy/cbs.env.example (prod)
+            cbs-uat-env           Secret file        filled deploy/cbs-uat.env.example (CBS repo)
+            cbs-prod-env          Secret file        filled deploy/cbs-prod.env.example (CBS repo)
 
           -----------------------------------------------------------
           Cloudflare (Zero Trust dashboard)

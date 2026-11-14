@@ -5,7 +5,7 @@
 #   target:  digitalocean | gke | raspberrypi
 #   command: all | init | validate | plan | apply | output | destroy | test |
 #            ansible | rancher | argocd | prometheus | grafana | logging | jenkins |
-#            postgres | mongodb | redis | rabbitmq | cbs-env |
+#            postgres | mongodb | redis | rabbitmq |
 #            install | uninstall | help
 #
 # Examples:
@@ -36,7 +36,7 @@ Usage: $0 <target> <command>
   target:  digitalocean | gke | raspberrypi
   command: all | init | validate | plan | apply | output | destroy | test |
            ansible | rancher | argocd | prometheus | grafana | logging | jenkins |
-           postgres | mongodb | redis | rabbitmq | cbs-env |
+           postgres | mongodb | redis | rabbitmq |
            install | uninstall | help
 EOF
     exit 0
@@ -221,10 +221,9 @@ install_cbs_data_menu() {
   echo "  2) MongoDB      (mongodb.yml  - cbs_logs_uat / cbs_logs_prod)"
   echo "  3) Redis        (redis.yml    - UAT DB 1 / PROD DB 0)"
   echo "  4) RabbitMQ     (rabbitmq.yml - vhost cbs_uat / cbs_prod)"
-  echo "  5) All four, then write cbs-uat.env / cbs-prod.env"
-  echo "  6) Env files only (cbs-env.yml - after changing a password)"
-  echo "  7) Back"
-  read -r -p "Enter choice [1-7]: " c
+  echo "  5) All four"
+  echo "  6) Back"
+  read -r -p "Enter choice [1-6]: " c
   case $c in
     1) run_playbook "Install PostgreSQL" "$P_INSTALL/postgres.yml" ;;
     2) run_playbook "Install MongoDB"    "$P_INSTALL/mongodb.yml" ;;
@@ -233,10 +232,8 @@ install_cbs_data_menu() {
     5) run_playbook "Install PostgreSQL" "$P_INSTALL/postgres.yml"
        run_playbook "Install MongoDB"    "$P_INSTALL/mongodb.yml"
        run_playbook "Install Redis"      "$P_INSTALL/redis.yml"
-       run_playbook "Install RabbitMQ"   "$P_INSTALL/rabbitmq.yml"
-       run_playbook "CBS env files"      "$P_INSTALL/cbs-env.yml" ;;
-    6) run_playbook "CBS env files"      "$P_INSTALL/cbs-env.yml" ;;
-    7) return 0 ;;
+       run_playbook "Install RabbitMQ"   "$P_INSTALL/rabbitmq.yml" ;;
+    6) return 0 ;;
     *) print_error "Invalid choice" ;;
   esac
 }
@@ -372,7 +369,6 @@ Usage: $0 <target> <command>
     mongodb        Install MongoDB for CBS
     redis          Install Redis for CBS
     rabbitmq       Install RabbitMQ for CBS
-    cbs-env        Write cbs-uat.env / cbs-prod.env for Jenkins (after the 4 above)
     install        Show install menu
     uninstall      Show uninstall menu
     help           Show this help
@@ -417,7 +413,6 @@ case "$COMMAND" in
   mongodb)    run_playbook "Install MongoDB"       "$P_INSTALL/mongodb.yml" ;;
   redis)      run_playbook "Install Redis"         "$P_INSTALL/redis.yml" ;;
   rabbitmq)   run_playbook "Install RabbitMQ"      "$P_INSTALL/rabbitmq.yml" ;;
-  cbs-env)    run_playbook "CBS env files"         "$P_INSTALL/cbs-env.yml" ;;
   install)    install_menu ;;
   uninstall)  uninstall_menu ;;
   help|*)     show_help ;;

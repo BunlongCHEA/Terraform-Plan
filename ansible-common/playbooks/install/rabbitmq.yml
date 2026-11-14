@@ -8,7 +8,6 @@
 #   CBS declares its own exchange/queues at startup.
 #
 # Run:  ./terraform_main.sh raspberrypi rabbitmq
-# Then: ./terraform_main.sh raspberrypi cbs-env
 # ===========================================
 - name: Install RabbitMQ for CBS
   hosts: os_servers
@@ -67,6 +66,15 @@
           UI from laptop: on {{ first_master }} run
             sudo kubectl -n {{ cbs_data_namespace }} port-forward --address 0.0.0.0 svc/rabbitmq 15672:15672
             then open http://<{{ first_master }}-ip>:15672  (admin login)
+          {% for e in cbs_envs %}
+
+          Lines for cbs-{{ e }}.env:
+            RABBITMQ_HOST={{ cbs_hosts.rabbitmq }}
+            RABBITMQ_PORT=5672
+            RABBITMQ_USER=cbs_{{ e }}
+            RABBITMQ_PASS={{ pw['rabbitmq_' ~ e] }}
+            RABBITMQ_VHOST=cbs_{{ e }}
+          {% endfor %}
       no_log: true
       delegate_to: localhost
       become: false
@@ -77,5 +85,4 @@
         msg:
           - "RabbitMQ is running: {{ cbs_hosts.rabbitmq }}:5672 (vhosts cbs_uat, cbs_prod)"
           - "Logins: {{ cbs_access_dir }}/rabbitmq-access-info.txt"
-          - "Next  : ./terraform_main.sh <target> cbs-env  (after all 4 data services)"
       run_once: true
