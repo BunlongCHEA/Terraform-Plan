@@ -164,6 +164,15 @@
               spec:
                 nodeSelector:
                   {{ db_node_label }}: "true"
+                # Start directly as the image's own "mongodb" user (999:999). The image entrypoint
+                # then skips its root -> user switch (gosu / su-exec); as root on this cluster
+                # gosu spun at 100% CPU forever and the database never started.
+                securityContext:
+                  runAsUser: 999
+                  runAsGroup: 999
+                  runAsNonRoot: true
+                  fsGroup: 999
+                  fsGroupChangePolicy: OnRootMismatch
                 containers:
                   - name: mongodb
                     image: {{ mongodb_image }}

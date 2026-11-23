@@ -163,6 +163,15 @@
               spec:
                 nodeSelector:
                   {{ db_node_label }}: "true"
+                # Start directly as the image's own "rabbitmq" user (100:101). The image entrypoint
+                # then skips its root -> user switch (gosu / su-exec); as root on this cluster
+                # gosu spun at 100% CPU forever and the database never started.
+                securityContext:
+                  runAsUser: 100
+                  runAsGroup: 101
+                  runAsNonRoot: true
+                  fsGroup: 101
+                  fsGroupChangePolicy: OnRootMismatch
                 terminationGracePeriodSeconds: 60
                 containers:
                   - name: rabbitmq
