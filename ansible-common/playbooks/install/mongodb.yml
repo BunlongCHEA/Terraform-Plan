@@ -171,6 +171,13 @@
                     ports: [{containerPort: 27017, name: mongodb}]
                     envFrom:
                       - secretRef: {name: mongodb-admin}
+                    # First start (initdb / data recovery) can take minutes: liveness and
+                    # readiness only begin after this succeeds (up to 10 min: 60 x 10s).
+                    startupProbe:
+                      exec: {command: ["mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]}
+                      periodSeconds: 10
+                      timeoutSeconds: 5
+                      failureThreshold: 60
                     readinessProbe:
                       exec: {command: ["mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]}
                       periodSeconds: 10

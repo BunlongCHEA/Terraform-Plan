@@ -172,13 +172,19 @@
                       - {containerPort: 15672, name: management}
                     envFrom:
                       - secretRef: {name: rabbitmq-admin}
+                    # First start (initdb / data recovery) can take minutes: liveness and
+                    # readiness only begin after this succeeds (up to 10 min: 60 x 10s).
+                    startupProbe:
+                      exec: {command: ["rabbitmq-diagnostics", "-q", "ping"]}
+                      periodSeconds: 10
+                      timeoutSeconds: 5
+                      failureThreshold: 60
                     readinessProbe:
                       exec: {command: ["rabbitmq-diagnostics", "-q", "ping"]}
                       periodSeconds: 15
                       timeoutSeconds: 10
                     livenessProbe:
                       exec: {command: ["rabbitmq-diagnostics", "-q", "status"]}
-                      initialDelaySeconds: 60
                       periodSeconds: 30
                       timeoutSeconds: 15
                       failureThreshold: 6

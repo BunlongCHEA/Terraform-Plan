@@ -174,12 +174,21 @@
                         valueFrom: {secretKeyRef: {name: postgres-admin, key: POSTGRES_PASSWORD}}
                       - {name: PGDATA, value: /var/lib/postgresql/data/pgdata}
                       - {name: POSTGRES_INITDB_ARGS, value: "--auth-host=scram-sha-256"}
+                    # First start (initdb / data recovery) can take minutes: liveness and
+                    # readiness only begin after this succeeds (up to 10 min: 60 x 10s).
+                    startupProbe:
+                      exec: {command: ["pg_isready", "-U", "postgres"]}
+                      periodSeconds: 10
+                      timeoutSeconds: 5
+                      failureThreshold: 60
                     readinessProbe:
                       exec: {command: ["pg_isready", "-U", "postgres"]}
                       periodSeconds: 10
+                      timeoutSeconds: 5
                     livenessProbe:
                       exec: {command: ["pg_isready", "-U", "postgres"]}
                       periodSeconds: 20
+                      timeoutSeconds: 5
                       failureThreshold: 6
                     resources:
                       requests: {cpu: 250m, memory: 512Mi}

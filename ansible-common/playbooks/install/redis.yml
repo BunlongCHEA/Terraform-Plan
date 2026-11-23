@@ -184,12 +184,21 @@
                         valueFrom: {secretKeyRef: {name: redis-admin, key: REDIS_PASSWORD}}
                       - name: REDISCLI_AUTH
                         valueFrom: {secretKeyRef: {name: redis-admin, key: REDIS_PASSWORD}}
+                    # First start (initdb / data recovery) can take minutes: liveness and
+                    # readiness only begin after this succeeds (up to 10 min: 60 x 10s).
+                    startupProbe:
+                      exec: {command: ["redis-cli", "ping"]}
+                      periodSeconds: 10
+                      timeoutSeconds: 5
+                      failureThreshold: 60
                     readinessProbe:
                       exec: {command: ["redis-cli", "ping"]}
                       periodSeconds: 10
+                      timeoutSeconds: 5
                     livenessProbe:
                       exec: {command: ["redis-cli", "ping"]}
                       periodSeconds: 20
+                      timeoutSeconds: 5
                     resources:
                       requests: {cpu: 100m, memory: 128Mi}
                       limits: {memory: 768Mi}
