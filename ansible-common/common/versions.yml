@@ -49,7 +49,10 @@ kyverno_version: "1.19.1"        # https://github.com/kyverno/kyverno/releases
 # --- Shared databases in K3s, namespace "databases" (postgres/mongodb/redis/rabbitmq.yml) ---
 # Keep app-side tools on the same major (e.g. pg_dump image in the CBS Jenkinsfile).
 # MongoDB 5+ needs AVX (x86) / ARMv8.2-A (arm64) on the data node.
-postgres_image: "postgres:17-alpine"
+# PostgreSQL 18+ images keep data in /var/lib/postgresql/<major>/docker and expect the
+# volume at /var/lib/postgresql (postgres.yml does this). A major upgrade needs pg_upgrade
+# or dump/restore — never just bump this tag on an existing database.
+postgres_image: "postgres:19-alpine"
 mongodb_image: "mongo:8.0"
 redis_image: "redis:7.4-alpine"
 rabbitmq_image: "rabbitmq:4.1-management-alpine"

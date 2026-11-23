@@ -172,7 +172,6 @@
                     env:
                       - name: POSTGRES_PASSWORD
                         valueFrom: {secretKeyRef: {name: postgres-admin, key: POSTGRES_PASSWORD}}
-                      - {name: PGDATA, value: /var/lib/postgresql/data/pgdata}
                       - {name: POSTGRES_INITDB_ARGS, value: "--auth-host=scram-sha-256"}
                     # First start (initdb / data recovery) can take minutes: liveness and
                     # readiness only begin after this succeeds (up to 10 min: 60 x 10s).
@@ -194,7 +193,8 @@
                       requests: {cpu: 250m, memory: 512Mi}
                       limits: {memory: 2Gi}
                     volumeMounts:
-                      - {name: data, mountPath: /var/lib/postgresql/data}
+                      # 18+ image layout: data in /var/lib/postgresql/<major>/docker (image default PGDATA)
+                      - {name: data, mountPath: /var/lib/postgresql}
             volumeClaimTemplates:
               - metadata: {name: data}
                 spec:
