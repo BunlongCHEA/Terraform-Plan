@@ -225,7 +225,7 @@
         KUBECONFIG: "{{ kubeconfig_path }}"
       register: app_status
       until: app_status.stdout == "Synced/Healthy"
-      retries: 40
+      retries: 5
       delay: 15
       changed_when: false
       when: is_master
