@@ -33,6 +33,7 @@
     argocd_namespace: argocd
     db_size: "{{ postgres_storage_size | default('20Gi') }}"
     db_host: "postgres.{{ db_namespace }}.svc.cluster.local"
+    db_nodeport: "{{ postgres_nodeport | default('30432') }}"
     access_info_dir: "{{ (playbook_dir ~ '/../../access-info') | realpath }}"
 
   tasks:
@@ -146,6 +147,21 @@
             ports:
               - {name: postgres, port: 5432, targetPort: 5432}
           ---
+          {% if db_nodeport | string | length > 0 %}
+          # External access: <any-node-ip>:{{ db_nodeport }} (pgAdmin over Tailscale)
+          apiVersion: v1
+          kind: Service
+          metadata:
+            name: postgres-external
+            namespace: {{ db_namespace }}
+            labels: {app.kubernetes.io/name: postgres}
+          spec:
+            type: NodePort
+            selector: {app.kubernetes.io/name: postgres}
+            ports:
+              - {name: postgres, port: 5432, targetPort: 5432, nodePort: {{ db_nodeport }}}
+          ---
+          {% endif %}
           apiVersion: apps/v1
           kind: StatefulSet
           metadata:
@@ -263,9 +279,13 @@
           In cluster  : {{ db_host }}:5432
           Admin       : postgres / {{ postgres_admin_password }}
 
-          Connect from your laptop (keep the terminal open):
+          Connect from your laptop (pgAdmin / DBeaver / psql):
+          {% if db_nodeport | string | length > 0 %}
+            host <any-node Tailscale or LAN IP>  port {{ db_nodeport }}  user postgres  db postgres
+          {% else %}
             on {{ first_master }}:  sudo kubectl -n {{ db_namespace }} port-forward --address 0.0.0.0 svc/postgres 5432:5432
-            then DBeaver / psql →  host <{{ first_master }}-ip>  port 5432  user postgres
+            then host <{{ first_master }}-ip>  port 5432  user postgres
+          {% endif %}
 
           psql shell on the server:
             sudo kubectl -n {{ db_namespace }} exec -it postgres-0 -- psql -U postgres

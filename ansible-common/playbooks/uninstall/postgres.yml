@@ -41,7 +41,7 @@
     - name: "[MASTER] Delete leftovers: StatefulSet/Service (if created without ArgoCD), Secret, volume"
       shell: |
         K="kubectl -n {{ db_namespace }}"
-        $K delete statefulset/{{ db_name }} service/{{ db_name }} --ignore-not-found --wait=true
+        $K delete statefulset/{{ db_name }} service/{{ db_name }} service/{{ db_name }}-external --ignore-not-found --wait=true
         $K delete secret {{ db_name }}-admin --ignore-not-found
         $K delete pvc data-{{ db_name }}-0 --ignore-not-found
       args:
