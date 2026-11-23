@@ -226,7 +226,7 @@
       register: app_status
       until: app_status.stdout == "Synced/Healthy"
       retries: 5
-      delay: 15
+      delay: 60
       changed_when: false
       when: is_master
 
