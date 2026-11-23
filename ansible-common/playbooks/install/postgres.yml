@@ -167,6 +167,8 @@
                 # then skips its root -> user switch (gosu / su-exec); as root on this cluster
                 # gosu spun at 100% CPU forever and the database never started.
                 securityContext:
+                  appArmorProfile:
+                    type: Unconfined
                   runAsUser: 70
                   runAsGroup: 70
                   runAsNonRoot: true

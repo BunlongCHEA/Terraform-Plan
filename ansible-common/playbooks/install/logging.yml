@@ -140,6 +140,13 @@
           podTemplate:
             spec:
               nodeSelector: "{{ stateful_node_selector }}"
+              # Kernel 7.0.0-4x + containerd AppArmor stacking blocks self-signals
+              # (JVM SIGQUIT to itself -> entitlement agent attach fails).
+              # Remove once containerd PR #14487 ships in k3s.
+              securityContext:
+                fsGroup: 1000
+                appArmorProfile:
+                  type: Unconfined
               containers:
                 - name: elasticsearch
                   resources: "{{ es_resources }}"
